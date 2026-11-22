@@ -43,7 +43,6 @@ sealed class AstNode {
     data class While(val condition: AstNode, val body: AstNode) : AstNode()
     data class For(val initializer: AstNode?, val condition: AstNode?, val increment: AstNode?, val body: AstNode) : AstNode()
     data class Return(val value: AstNode?) : AstNode()
-    data class ImportNode(val importPath: String, val alias: String) : AstNode()
     data class ExternalFuncDecl(
         val name: String,
         val paramTypes: List<Type>,
@@ -144,7 +143,8 @@ class parser(val rawToken: MutableList<Token>) {
     fun declaration(): AstNode {
         val current = peek() ?: throw IllegalStateException("Unexpected end of input in declaration")
         return when {
-            current.type == LexState.IDENTIFIER && current.value == "import" -> importDeclaration()
+            current.type == LexState.IDENTIFIER && current.value == "import" ->
+                throw IllegalStateException("The import statement has been removed. Use external fun for host functions.")
             isTypeKeyword(current) -> {
                 // 检查是否是函数声明（类型关键字后接标识符再接 '('）
                 val next1 = rawToken.getOrNull(nowElement + 1)
@@ -287,29 +287,6 @@ class parser(val rawToken: MutableList<Token>) {
 
         val body = codeBlock()
         return AstNode.FuncDefNode(name, args, body)
-    }
-
-    private fun importDeclaration(): AstNode {
-        consumeIdentifier("import")
-        // 解析导入路径（字符串字面量）
-        val pathToken = peek() ?: throw IllegalStateException("Expected import path string")
-        if (pathToken.type != LexState.STRING) {
-            throw IllegalStateException("Expected import path string, but found '${pathToken.value}'")
-        }
-        val importPath = pathToken.value
-        nowElement++
-
-        // 解析可选的 "as alias" 部分
-        val alias: String = if (check(LexState.IDENTIFIER, "as")) {
-            consumeIdentifier("as")
-            consumeIdentifier()
-        } else {
-            // 如果没有 as，则使用导入路径的最后一段作为别名
-            importPath.split(".").last()
-        }
-
-        consumeOperator(";")
-        return AstNode.ImportNode(importPath, alias)
     }
 
     /**

@@ -73,6 +73,10 @@ enum class Opcode(val value: Int) {
  */
 class ConstantPool {
     private val constants = mutableListOf<MaidValue>()
+
+    internal fun append(value: MaidValue) {
+        constants.add(value)
+    }
     
     /** 添加一个常量并返回其索引（如果已存在相同值则返回现有索引）。 */
     fun addConstant(value: MaidValue): Int {
@@ -127,7 +131,9 @@ class BytecodeChunk(val name: String = "main") {
         var i = 0
         while (i < code.size) {
             val opcode = Opcode.fromValue(code[i])
-            out.append("%04d  %-20s".format(i, opcode.name))
+            out.append(i.toString().padStart(4, '0'))
+            out.append("  ")
+            out.append(opcode.name.padEnd(20))
             i++
             when (opcode) {
                 Opcode.LOAD_INT, Opcode.LOAD_FLOAT, Opcode.LOAD_STRING, Opcode.LOAD_CHAR,

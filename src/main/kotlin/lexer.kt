@@ -39,7 +39,7 @@ enum class LexState(val id: Int) {
     IDLE(0), IDENTIFIER(1), INTEGER(2), FLOAT(3), CHAR(4), STRING(5), OPERATOR(6), ANNOTATION(7)
 }
 
-suspend fun lexer(rawText: String): MutableList<Token> {
+fun lexer(rawText: String): MutableList<Token> {
     var state = LexState.IDLE  // 0 -> Null Statement 1-> Identify 2->Int 3->Float 4:Char 5:String 6:Operator
     var catchSlash: Boolean = false //  捕捉到了反斜杠时为 true
     var lexerBuffer: String = ""

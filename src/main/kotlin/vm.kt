@@ -22,8 +22,7 @@ private class Frame(
     var ip: Int = 0,                    // 指令指针
     var stackStart: Int = 0             // 该帧在操作数栈中的起始位置（用于计算相对偏移）
 ) {
-    /** 返回当前指令（不推进 ip）。 */
-    fun peekOpcode(): Opcode = Opcode.fromValue(chunk.code[ip])
+    fun readOpcode(): Opcode = Opcode.fromValue(readInt())
     
     /** 读取一个字节操作数并推进 ip。 */
     fun readByte(): Int = chunk.code[ip++]
@@ -60,24 +59,30 @@ class VM {
      * 执行一个字节码块（顶级代码或函数）。
      */
     fun interpret(chunk: BytecodeChunk): MaidValue {
+        return try {
+            execute(chunk)
+        } catch (e: Exception) {
+            println("VM runtime error: ${e.message}")
+            e.printStackTrace()
+            MaidValue.NullVal
+        }
+    }
+
+    internal fun execute(chunk: BytecodeChunk): MaidValue {
         // 创建初始帧（无参数，无局部变量）
         val frame = Frame(chunk, arrayOf())
+        stack.clear()
         callStack.clear()
         callStack.addLast(frame)
         currentFrame = frame
         running = true
         
         // 主执行循环
-        try {
-            while (running && callStack.isNotEmpty()) {
-                val frame = callStack.last()
-                currentFrame = frame
-                executeInstruction(frame)
-            }
-        } catch (e: Exception) {
-            println("VM runtime error: ${e.message}")
-            e.printStackTrace()
-            return MaidValue.NullVal
+        while (running && callStack.isNotEmpty()) {
+            val frame = callStack.last()
+            if (frame.ip == frame.chunk.code.size) break
+            currentFrame = frame
+            executeInstruction(frame)
         }
         
         // 执行结束时栈顶应保存返回值
@@ -88,7 +93,7 @@ class VM {
      * 执行当前帧的一条指令。
      */
     private fun executeInstruction(frame: Frame) {
-        val opcode = frame.peekOpcode()
+        val opcode = frame.readOpcode()
         when (opcode) {
             // 常量加载
             Opcode.LOAD_INT -> {
@@ -269,15 +274,10 @@ class VM {
             }
             Opcode.RETURN -> {
                 val returnValue = if (stack.isNotEmpty()) stack.removeLast() else MaidValue.NullVal
-                // 返回到调用者（弹出当前帧）
                 callStack.removeLast()
-                if (callStack.isNotEmpty()) {
-                    // 将返回值压入调用者的栈
-                    callStack.last().also { it.stack.addLast(returnValue) }
-                } else {
-                    // 顶级返回，停止执行
+                stack.addLast(returnValue)
+                if (callStack.isEmpty()) {
                     running = false
-                    stack.addLast(returnValue)
                 }
             }
             

@@ -1,6 +1,6 @@
 # MaidLang – 嵌入式轻量脚本语言
 
-MaidLang 是一个基于 Kotlin 的嵌入式轻量脚本语言，设计用于自动化控制脚本（原为 [MobileAIDomestic](https://github.com/huy264128-netizen/MobileAIDomestic/) 项目设计）。它提供了静态类型系统、C 风格语法、解释器与编译器/虚拟机双执行引擎，适合作为嵌入式 DSL 或教学项目。
+MaidLang 是一个基于 Kotlin 的嵌入式轻量脚本语言，专为 [huy264128-netizen/maid](https://github.com/huy264128-netizen/maid) 项目的自动化控制脚本设计。它提供了静态类型系统、C 风格语法、解释器与编译器/虚拟机双执行引擎，也适合作为嵌入式 DSL 或教学项目。命令行程序通过 Kotlin/Native 构建，运行时无需 JVM。
 
 ## 特性
 
@@ -8,8 +8,8 @@ MaidLang 是一个基于 Kotlin 的嵌入式轻量脚本语言，设计用于自
 - **类型推断** – 使用 `var` 关键字自动推断变量类型。
 - **丰富的语法** – 变量声明、算术/逻辑/位运算、条件语句（`if`）、循环（`while` / `for`）、函数定义与调用、代码块作用域。
 - **双执行引擎** – 提供**解释器**（直接执行 AST）和**编译器+虚拟机**（将源码编译为字节码后执行）两种运行方式。
-- **可扩展性** – 支持 `import` 语句反射调用 Kotlin/Java 静态方法，以及 `external fun` 免反射原生函数注册。
-- **完整的测试套件** – 包含 26 个测试用例，自动验证解释器与编译器执行结果。
+- **可扩展性** – 解释器支持通过 `external fun` 调用 Kotlin 宿主显式注册的函数。
+- **解释器测试套件** – 包含 26 个测试用例，可通过命令行运行。
 
 ## 项目结构
 
@@ -21,11 +21,12 @@ MaidLang 是一个基于 Kotlin 的嵌入式轻量脚本语言，设计用于自
 │   ├── interpreter.kt        # 解释器（AST 直接执行）
 │   ├── bytecode.kt           # 字节码定义（Opcode、常量池、字节码块）
 │   ├── compiler.kt           # 编译器（AST → 字节码）
-│   ├── vm.kt                 # 虚拟机（字节码执行引擎）
-│   └── tester.kt             # 测试套件 + REPL + 文件执行入口
+│   └── vm.kt                 # 虚拟机（字节码执行引擎）
+├── src/hostMain/kotlin/
+│   ├── tester.kt             # 测试套件、REPL 和文件执行入口
+│   └── scriptFile.kt         # 原生文件读取
 ├── docs.md                   # 语言规范文档
 ├── build.gradle.kts          # Gradle 构建配置
-├── gradlew / gradlew.bat     # Gradle Wrapper
 ├── *.ml                      # MaidLang 示例源文件
 ├── plans/
 │   └── compiler_vm_plan.md   # 架构设计文档
@@ -36,20 +37,17 @@ MaidLang 是一个基于 Kotlin 的嵌入式轻量脚本语言，设计用于自
 
 ### 环境要求
 
-- **JDK 21+**（推荐 JDK 21）
-- **Gradle**（可使用项目自带的 `gradlew.bat` / `gradlew`）
+- 构建需要 Gradle 9.6 和 JDK 17 或更新版本。首次构建会下载 Kotlin/Native 工具链。
+- 构建目标按本机平台选择，支持 Linux x64 / ARM64、macOS ARM64 和 Windows x64。macOS 构建还需要 Xcode 命令行工具。
 
-### 运行测试套件
-
-项目已集成完整的测试用例，验证所有语言特性：
+### 构建并运行测试
 
 ```bash
-# Windows
-gradlew.bat run --args="--test"
-
-# Linux/macOS
-./gradlew run --args="--test"
+gradle linkReleaseExecutableHost
+./build/bin/host/releaseExecutable/maidLang.kexe --test
 ```
+
+Windows 产物位于同一目录，文件名为 `maidLang.exe`。
 
 测试套件将输出：
 
@@ -65,25 +63,22 @@ MaidLang 测试套件
 
 ### 运行 MaidLang 源文件
 
-创建 `.ml` 源文件（如 [`test_for.ml`](test_for.ml)），然后直接运行：
+创建 `hello.ml`：
+
+```c
+println("Hello, MaidLang!");
+```
+
+运行脚本：
 
 ```bash
-gradlew.bat run --args="test_for.ml"
+./build/bin/host/releaseExecutable/maidLang.kexe hello.ml
 ```
 
 示例输出：
 
 ```
-=> IntVal(value=10)
-sum = 10
-5! = 120
-count = 0
-count = 1
-count = 2
-total = 9
-innerVar = 0
-innerVar = 10
-outside = 100
+Hello, MaidLang!
 ```
 
 ### 使用 REPL 交互式环境
@@ -91,7 +86,7 @@ outside = 100
 不带参数运行即可进入 REPL 模式：
 
 ```bash
-gradlew.bat run
+./build/bin/host/releaseExecutable/maidLang.kexe
 ```
 
 ```
@@ -361,7 +356,7 @@ float y = sin(1.57);   // ~1.0
 float z = sqrt(9.0);   // 3.0
 ```
 
-需要在 Kotlin 宿主代码中注册：
+解释器需要在执行脚本前注册函数。命令行程序已注册这些数学函数。嵌入自己的 Kotlin/Native 应用时，可按以下方式注册：
 
 ```kotlin
 interpreter.registerNative("abs") { args ->
@@ -369,24 +364,20 @@ interpreter.registerNative("abs") { args ->
 }
 ```
 
-### 使用 import 调用 Kotlin/Java 方法
-
-```c
-import "java.lang.Math.abs" as abs;
-import "java.lang.Math.sin" as sin;
-
-int x = abs(-5);     // 5
-float y = sin(1.57); // ~1.0
-```
+原先使用脚本 `import` 的代码需要改用 `external fun`，并由宿主注册对应的函数。
 
 ## 调用方式总结
 
 | 方式 | 命令 | 说明 |
 |------|------|------|
-| 运行测试套件 | `gradlew.bat run --args="--test"` | 验证所有语言特性 |
-| 运行 `.ml` 文件 | `gradlew.bat run --args="文件名.ml"` | 执行 MaidLang 源文件 |
-| REPL 交互模式 | `gradlew.bat run` | 逐行输入并执行代码 |
+| 运行测试套件 | `maidLang.kexe --test` | 运行解释器测试 |
+| 运行 `.ml` 文件 | `maidLang.kexe 文件名.ml` | 执行 MaidLang 源文件 |
+| 编译 `.ml` 文件 | `maidLang.kexe --compile 文件名.ml` | 生成同名 `.mlbc` 字节码文件 |
+| 运行 `.mlbc` 文件 | `maidLang.kexe 文件名.mlbc` | 加载字节码并用 MaidLang VM 执行 |
+| REPL 交互模式 | `maidLang.kexe` | 逐行输入并执行代码 |
 | Kotlin 嵌入 | 调用 `Interpreter` / `Compiler` + `VM` API | 在 Kotlin 项目中嵌入使用 |
+
+编译和运行字节码的示例见 [语言规范](docs.md#5-实现细节)。
 
 ## 未来计划（待实现）
 
@@ -399,7 +390,7 @@ float y = sin(1.57); // ~1.0
 
 本项目为开源教学/实验项目，欢迎提交 Issue 或 Pull Request。
 
-- 仓库地址：[https://github.com/huy264128-netizen/MobileAIDomestic/](https://github.com/huy264128-netizen/MobileAIDomestic/)（原项目）
+- 宿主项目：[huy264128-netizen/maid](https://github.com/huy264128-netizen/maid)
 - 问题反馈：请在 GitHub 仓库中创建 Issue。
 
 ## 许可证

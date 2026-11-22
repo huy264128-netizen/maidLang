@@ -1,6 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.1.20"
-    application
+    kotlin("multiplatform") version "2.4.21"
 }
 
 group = "org.example"
@@ -10,48 +9,25 @@ repositories {
     mavenCentral()
 }
 
-dependencies {
-    implementation(kotlin("stdlib"))
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
-}
-
-tasks.test {
-    useJUnitPlatform()
-}
+val hostOs = System.getProperty("os.name")
+val hostArch = System.getProperty("os.arch")
+val isArm64 = hostArch == "aarch64" || hostArch == "arm64"
+val isX64 = hostArch == "amd64" || hostArch == "x86_64"
 
 kotlin {
-    jvmToolchain(21)
-    compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+    val hostTarget = when {
+        hostOs == "Linux" && isArm64 -> linuxArm64("host")
+        hostOs == "Linux" && isX64 -> linuxX64("host")
+        hostOs == "Mac OS X" && isArm64 -> macosArm64("host")
+        hostOs.startsWith("Windows") && isX64 -> mingwX64("host")
+        else -> error("Unsupported Kotlin/Native build host: $hostOs ($hostArch)")
     }
-}
-
-application {
-    mainClass.set("TesterKt")
-}
-
-// Diagnostic task for file lock detection
-tasks.register("checkFileLock") {
-    doLast {
-        val file = file("build/distributions/maidLang-1.0-SNAPSHOT.zip")
-        logger.lifecycle("Checking lock status for ${file.absolutePath}")
-        if (file.exists()) {
-            val deleted = file.delete()
-            if (deleted) {
-                logger.lifecycle("File was NOT locked (successfully deleted)")
-                // Recreate empty file to avoid breaking subsequent tasks
-                file.createNewFile()
-            } else {
-                logger.lifecycle("File is LOCKED (could not delete)")
-                logger.lifecycle("This confirms the hypothesis that the file is locked by another process.")
-            }
-        } else {
-            logger.lifecycle("File does not exist")
-        }
+    hostTarget.binaries.executable {
+        baseName = "maidLang"
+        entryPoint = "main"
     }
-}
 
-// Add dependency so distZip runs after checking lock (optional)
-tasks.named("distZip") {
-    dependsOn("checkFileLock")
+    sourceSets.commonMain {
+        kotlin.srcDir("src/main/kotlin")
+    }
 }

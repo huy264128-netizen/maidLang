@@ -120,30 +120,9 @@ print("Hello");      // 输出不换行
 println("World");    // 输出并换行
 ```
 
-### 3.2 导入Kotlin/Java函数
+### 3.2 外部函数声明
 
-可以使用 `import` 语句导入任意 Kotlin/Java 类的静态方法：
-
-```c
-// 导入具体方法，指定别名
-import "java.lang.Math.abs" as abs;
-import "java.lang.Math.sin" as sin;
-import "java.lang.Math.sqrt" as sqrt;
-
-int x = abs(-5);       // 输出 5
-float y = sin(1.57);   // 输出 ~1.0
-float z = sqrt(9.0);   // 输出 3.0
-
-// 也支持 Kotlin 标准库
-import "kotlin.math.roundToInt" as round;
-int r = round(3.7);
-```
-
-导入路径格式为 `"包名.类名.方法名"`，`as` 指定在 MaidLang 中使用的别名。
-
-### 3.3 外部函数声明（免反射）
-
-可以使用 `external fun` 声明一个由 Kotlin 宿主代码注册的外部函数，无需反射即可调用：
+解释器通过 `external fun` 调用 Kotlin 宿主显式注册的函数。旧脚本中的反射 `import` 已移除。
 
 ```c
 // MaidLang 中声明外部函数签名
@@ -171,7 +150,7 @@ interpreter.registerNative("sin") { args ->
 
 省略 `-> 返回类型` 时默认为 `void`。
 
-### 3.4 运算符
+### 3.3 运算符
 
 支持双字符比较运算符：
 
@@ -202,6 +181,28 @@ void main() {
 ```
 
 ## 5. 实现细节
+
+MaidLang 源文件使用 `.ml` 扩展名，编译生成的字节码文件使用 `.mlbc` 扩展名。传入 `.mlbc` 文件时，命令行工具会加载它并交给 MaidLang VM 执行。
+
+例如，将以下内容保存为 `sum.ml`：
+
+```c
+int sum = 0;
+for (int i = 0; i < 5; i = i + 1) {
+    sum = sum + i;
+}
+return sum;
+```
+
+```bash
+gradle linkReleaseExecutableHost
+./build/bin/host/releaseExecutable/maidLang.kexe --compile sum.ml
+./build/bin/host/releaseExecutable/maidLang.kexe sum.mlbc
+```
+
+程序输出 `=> IntVal(value=10)`。Windows 上的可执行文件名为 `maidLang.exe`。`--compile` 可接收第二个路径参数指定输出文件，默认在源文件旁生成同名的 `.mlbc`。文件加载和执行失败时，命令行返回退出码 `1`。VM 的算术目前按整数计算，编译模式可以用 `return` 输出验证结果。函数定义和调用（包括 `println` 和 `external fun`）目前仅可用于解释器。
+
+`.mlbc` v1 依次存储 `MLBC` 魔数、版本号 `1`、常量数量、常量条目、指令字数和指令序列。除常量标签和字符串数据外，所有值均为 32 位大端整数。常量标签为单字节：`1` 表示整数，`2` 表示浮点位模式，`3` 后跟 UTF-8 字节长度及数据，`4` 表示 UTF-16 代码单元。跳转目标是从零开始的指令字索引。加载时会检查版本、长度、操作码和操作数。
 
 MaidLang 由以下组件构成：
 

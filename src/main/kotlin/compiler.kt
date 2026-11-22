@@ -185,19 +185,8 @@ class Compiler {
                 val afterLoop = context.chunk.code.size
                 context.chunk.code[jumpIfFalsePos + 1] = afterLoop
             }
-            is AstNode.FuncDefNode -> {
-                // 函数定义：暂时不编译函数体，仅记录函数名（后续实现）
-                println("Warning: function definition compilation not implemented yet")
-                // 生成一个空操作
-                context.chunk.emit(Opcode.LOAD_NULL)
-            }
-            is AstNode.FuncCall -> {
-                // 函数调用：依次编译每个参数，然后调用 CALL 指令
-                for (arg in node.args) {
-                    compileNode(arg)
-                }
-                context.chunk.emit(Opcode.CALL, node.args.size)
-            }
+            is AstNode.FuncDefNode -> error("Function definitions are not supported in compiled mode")
+            is AstNode.FuncCall -> error("Function calls are not supported in compiled mode")
             is AstNode.Return -> {
                 // 返回值：编译返回值表达式，然后发出 RETURN 指令
                 if (node.value != null) {
@@ -207,22 +196,10 @@ class Compiler {
                 }
                 context.chunk.emit(Opcode.RETURN)
             }
-            is AstNode.ImportNode -> {
-                // 导入声明：在编译模式下暂时只输出警告
-                println("Warning: import statement is not supported in compiled mode yet")
-                context.chunk.emit(Opcode.LOAD_NULL)
-            }
-            is AstNode.ExternalFuncDecl -> {
-                // 外部函数声明：编译模式下暂不支持
-                println("Warning: external function declaration is not supported in compiled mode yet")
-                context.chunk.emit(Opcode.LOAD_NULL)
-            }
+            is AstNode.ExternalFuncDecl -> error("External functions are not supported in compiled mode")
             is AstNode.ProxyVar -> {
                 // 数组/代理访问：暂不实现
                 throw IllegalStateException("ProxyVar compilation not implemented")
-            }
-            else -> {
-                throw IllegalStateException("Unsupported AST node type: ${node::class.simpleName}")
             }
         }
     }
