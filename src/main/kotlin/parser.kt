@@ -323,7 +323,8 @@ class parser(val rawToken: MutableList<Token>) {
         }
         consumeOperator(")")
         // 解析可选的返回类型
-        val returnType: Type = if (match(LexState.OPERATOR, "-") && match(LexState.OPERATOR, ">")) {
+        val returnType: Type = if (match(LexState.OPERATOR, "-")) {
+            consumeOperator(">")
             parseType()
         } else {
             Type.VoidType
@@ -474,7 +475,7 @@ class parser(val rawToken: MutableList<Token>) {
         val left = logicalOr()
 
         if (match(LexState.OPERATOR, "=")) {
-            val right = assignment()
+            val right = withNesting { assignment() }
             if (left is AstNode.Variable || left is AstNode.ProxyVar) {
                 return AstNode.Assign(left, right)
             }
@@ -606,13 +607,16 @@ class parser(val rawToken: MutableList<Token>) {
         while (true) {
             when {
                 match(LexState.OPERATOR, "(") -> {
-                    val args = arrayListOf<AstNode>()
-                    if (!check(LexState.OPERATOR, ")")) {
-                        do {
-                            args.add(expression())
-                        } while (match(LexState.OPERATOR, ","))
+                    val args = withNesting {
+                        val list = arrayListOf<AstNode>()
+                        if (!check(LexState.OPERATOR, ")")) {
+                            do {
+                                list.add(expression())
+                            } while (match(LexState.OPERATOR, ","))
+                        }
+                        consumeOperator(")")
+                        list
                     }
-                    consumeOperator(")")
                     node = if (node is AstNode.Variable) {
                         AstNode.FuncCall(node.name, args)
                     } else {
@@ -620,8 +624,11 @@ class parser(val rawToken: MutableList<Token>) {
                     }
                 }
                 match(LexState.OPERATOR, "[") -> {
-                    val index = expression()
-                    consumeOperator("]")
+                    val index = withNesting {
+                        val expr = expression()
+                        consumeOperator("]")
+                        expr
+                    }
                     node = if (node is AstNode.Variable) {
                         AstNode.ProxyVar(node.name, index)
                     } else {

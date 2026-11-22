@@ -113,6 +113,7 @@ class VM(
 
     private fun runChunk(chunk: BytecodeChunk): MaidValue {
         val mainEnd = chunk.functions.firstOrNull()?.entry ?: chunk.code.size
+        check(mainEnd in 0..chunk.code.size) { "Invalid main chunk boundary: $mainEnd" }
         callStack.addLast(Frame(chunk, start = 0, end = mainEnd, stackStart = 0))
         var instructions = 0L
         while (callStack.isNotEmpty()) {
@@ -151,14 +152,9 @@ class VM(
         val opcode = frame.readOpcode()
         when (opcode) {
             // 常量加载
-            Opcode.LOAD_INT -> {
+            Opcode.LOAD_INT, Opcode.LOAD_FLOAT, Opcode.LOAD_STRING, Opcode.LOAD_CHAR -> {
                 val constIndex = frame.readInt()
-                val value = frame.chunk.constants.getConstant(constIndex)
-                push(value)
-            }
-            Opcode.LOAD_FLOAT, Opcode.LOAD_STRING, Opcode.LOAD_CHAR -> {
-                // 与 LOAD_INT 类似，只是常量类型不同
-                val constIndex = frame.readInt()
+                check(constIndex in 0 until frame.chunk.constants.size()) { "Invalid constant index: $constIndex" }
                 val value = frame.chunk.constants.getConstant(constIndex)
                 push(value)
             }
@@ -175,6 +171,7 @@ class VM(
             // 变量存取
             Opcode.LOAD_VAR -> {
                 val varIndex = frame.readInt()
+                check(varIndex >= 0) { "Invalid global variable slot: $varIndex" }
                 val value = globalSlots[varIndex]
                     ?: (if (globals.isEmpty()) null else globals["var$varIndex"])
                     ?: MaidValue.NullVal
@@ -182,6 +179,7 @@ class VM(
             }
             Opcode.STORE_VAR -> {
                 val varIndex = frame.readInt()
+                check(varIndex >= 0) { "Invalid global variable slot: $varIndex" }
                 val value = pop(frame)
                 globalSlots[varIndex] = value
             }
@@ -376,41 +374,10 @@ class VM(
     }
     
     /**
-     * 应用二元运算（复用 interpreter.kt 中的逻辑）。
-     * 由于 interpreter.kt 中的 applyBinaryOp 是私有函数，这里临时复制一份简化实现。
+     * 应用二元运算（与解释器共享同一套运算和比较语义）。
      */
-    private fun applyBinaryOp(op: OpType, left: MaidValue, right: MaidValue): MaidValue {
-        // 简化实现：先实现一个简单版本，仅支持整数运算。
-        return when (op) {
-            OpType.ADD -> MaidValue.IntVal(left.asInt() + right.asInt())
-            OpType.SUB -> MaidValue.IntVal(left.asInt() - right.asInt())
-            OpType.MUL -> MaidValue.IntVal(left.asInt() * right.asInt())
-            OpType.DIV -> {
-                val l = left.asInt()
-                val r = right.asInt()
-                check(r != 0) { "Division by zero" }
-                MaidValue.IntVal(if (l == Int.MIN_VALUE && r == -1) Int.MIN_VALUE else l / r)
-            }
-            OpType.MOD -> {
-                val l = left.asInt()
-                val r = right.asInt()
-                check(r != 0) { "Modulo by zero" }
-                MaidValue.IntVal(if (l == Int.MIN_VALUE && r == -1) 0 else l % r)
-            }
-            OpType.GREATER -> MaidValue.IntVal(if (left.asInt() > right.asInt()) 1 else 0)
-            OpType.LESS -> MaidValue.IntVal(if (left.asInt() < right.asInt()) 1 else 0)
-            OpType.GREATER_EQUAL -> MaidValue.IntVal(if (left.asInt() >= right.asInt()) 1 else 0)
-            OpType.LESS_EQUAL -> MaidValue.IntVal(if (left.asInt() <= right.asInt()) 1 else 0)
-            OpType.EQUAL -> MaidValue.IntVal(if (left.asInt() == right.asInt()) 1 else 0)
-            OpType.NOT_EQUAL -> MaidValue.IntVal(if (left.asInt() != right.asInt()) 1 else 0)
-            OpType.LOGICAL_AND -> MaidValue.IntVal(if (left.asInt() != 0 && right.asInt() != 0) 1 else 0)
-            OpType.LOGICAL_OR -> MaidValue.IntVal(if (left.asInt() != 0 || right.asInt() != 0) 1 else 0)
-            OpType.BIT_AND -> MaidValue.IntVal(left.asInt() and right.asInt())
-            OpType.BIT_OR -> MaidValue.IntVal(left.asInt() or right.asInt())
-            OpType.BIT_XOR -> MaidValue.IntVal(left.asInt() xor right.asInt())
-            else -> MaidValue.NullVal
-        }
-    }
+    private fun applyBinaryOp(op: OpType, left: MaidValue, right: MaidValue): MaidValue =
+        evalBinaryOp(op, left, right)
     
     /**
      * 应用一元运算。

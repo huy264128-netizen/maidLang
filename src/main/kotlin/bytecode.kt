@@ -152,6 +152,7 @@ class BytecodeChunk(val name: String = "main") {
             i++
             when (opcode) {
                 Opcode.CALL_NATIVE -> {
+                    require(i + 1 < code.size) { "Truncated CALL_NATIVE instruction at index ${i - 1}" }
                     val (name, signature) = nativeCall(code[i], code[i + 1])
                     out.append(" $name ${signature.encode()}")
                     i += 2
@@ -160,9 +161,11 @@ class BytecodeChunk(val name: String = "main") {
                 Opcode.LOAD_VAR, Opcode.STORE_VAR, Opcode.LOAD_LOCAL, Opcode.STORE_LOCAL,
                 Opcode.JUMP, Opcode.JUMP_IF_TRUE, Opcode.JUMP_IF_FALSE,
                 Opcode.CALL -> {
+                    require(i < code.size) { "Truncated $opcode instruction at index ${i - 1}" }
                     val operand = code[i]
                     out.append(" $operand")
                     if (opcode in listOf(Opcode.LOAD_INT, Opcode.LOAD_FLOAT, Opcode.LOAD_STRING, Opcode.LOAD_CHAR)) {
+                        require(operand in 0 until constants.size()) { "Invalid constant index: $operand" }
                         val const = constants.getConstant(operand)
                         out.append("  ; $const")
                     }

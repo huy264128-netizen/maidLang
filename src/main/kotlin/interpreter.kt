@@ -29,7 +29,7 @@ sealed class MaidValue {
 
     fun asBool(): Boolean = asInt() != 0
 
-    override fun toString(): String = when (this) {
+    fun displayString(): String = when (this) {
         is IntVal -> value.toString()
         is FloatVal -> value.toString()
         is StringVal -> value
@@ -38,6 +38,8 @@ sealed class MaidValue {
         is NativeFuncVal -> "<native function $name>"
         NullVal -> "null"
     }
+
+    override fun toString(): String = displayString()
 }
 
 class Scope(val parent: Scope? = null) {
@@ -231,17 +233,7 @@ class Interpreter(
                         "print", "println" -> {
                             val args = node.args.map { eval(it, scope) }
                             // 自定义格式化，避免输出类型信息
-                            val formatted = args.joinToString(" ") { value ->
-                                when (value) {
-                                    is MaidValue.IntVal -> value.value.toString()
-                                    is MaidValue.FloatVal -> value.value.toString()
-                                    is MaidValue.StringVal -> value.value
-                                    is MaidValue.CharVal -> value.value.toString()
-                                    is MaidValue.FunctionVal -> "<function ${value.node.name}>"
-                                    is MaidValue.NativeFuncVal -> "<native function ${value.name}>"
-                                    MaidValue.NullVal -> "null"
-                                }
-                            }
+                            val formatted = args.joinToString(" ") { it.displayString() }
                             if (node.funName == "println") {
                                 println(formatted)
                             } else {
@@ -261,7 +253,27 @@ class Interpreter(
                     throw RuntimeException("External function '${node.name}' is not registered. " +
                             "Use interpreter.registerNative(\"${node.name}\") { ... } or NativeRegistry.register(...) in Kotlin host code.")
                 }
-                val funcVal = MaidValue.NativeFuncVal(node.name, nativeFunc)
+                val signature = NativeSignature(
+                    node.paramTypes.map(NativeType::fromType),
+                    NativeType.fromType(node.returnType)
+                )
+                val checkedFunc: NativeFunction = { args ->
+                    require(args.size == signature.parameters.size) {
+                        "External function '${node.name}' expects ${signature.parameters.size} arguments, got ${args.size}"
+                    }
+                    for (i in args.indices) {
+                        val expected = signature.parameters[i]
+                        require(expected.accepts(args[i])) {
+                            "External function '${node.name}' argument ${i + 1} must be ${expected.typeName}"
+                        }
+                    }
+                    val result = nativeFunc(args)
+                    require(signature.result.accepts(result)) {
+                        "External function '${node.name}' must return ${signature.result.typeName}"
+                    }
+                    result
+                }
+                val funcVal = MaidValue.NativeFuncVal(node.name, checkedFunc)
                 scope.define(node.name, funcVal)
                 MaidValue.NullVal
             }
@@ -277,63 +289,8 @@ class Interpreter(
         }
     }
 
-    private fun applyBinaryOp(op: OpType, left: MaidValue, right: MaidValue): MaidValue {
-        return when (op) {
-            OpType.ADD -> {
-                if (left is MaidValue.StringVal || right is MaidValue.StringVal) {
-                    MaidValue.StringVal(left.toString() + right.toString())
-                } else if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) {
-                    MaidValue.FloatVal(left.asFloat() + right.asFloat())
-                } else {
-                    MaidValue.IntVal(left.asInt() + right.asInt())
-                }
-            }
-            OpType.SUB -> if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) MaidValue.FloatVal(left.asFloat() - right.asFloat()) else MaidValue.IntVal(left.asInt() - right.asInt())
-            OpType.MUL -> if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) MaidValue.FloatVal(left.asFloat() * right.asFloat()) else MaidValue.IntVal(left.asInt() * right.asInt())
-            OpType.DIV -> {
-                if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) {
-                    MaidValue.FloatVal(left.asFloat() / right.asFloat())
-                } else {
-                    val l = left.asInt()
-                    val r = right.asInt()
-                    if (r == 0) throw RuntimeException("Division by zero")
-                    MaidValue.IntVal(if (l == Int.MIN_VALUE && r == -1) Int.MIN_VALUE else l / r)
-                }
-            }
-            OpType.MOD -> {
-                val l = left.asInt()
-                val r = right.asInt()
-                if (r == 0) throw RuntimeException("Modulo by zero")
-                MaidValue.IntVal(if (l == Int.MIN_VALUE && r == -1) 0 else l % r)
-            }
-            
-            OpType.EQUAL -> MaidValue.IntVal(if (compareValues(left, right) == 0) 1 else 0)
-            OpType.NOT_EQUAL -> MaidValue.IntVal(if (compareValues(left, right) != 0) 1 else 0)
-            OpType.GREATER -> MaidValue.IntVal(if (compareValues(left, right) > 0) 1 else 0)
-            OpType.LESS -> MaidValue.IntVal(if (compareValues(left, right) < 0) 1 else 0)
-            OpType.GREATER_EQUAL -> MaidValue.IntVal(if (compareValues(left, right) >= 0) 1 else 0)
-            OpType.LESS_EQUAL -> MaidValue.IntVal(if (compareValues(left, right) <= 0) 1 else 0)
-            
-            OpType.LOGICAL_AND -> MaidValue.IntVal(if (left.asBool() && right.asBool()) 1 else 0)
-            OpType.LOGICAL_OR -> MaidValue.IntVal(if (left.asBool() || right.asBool()) 1 else 0)
-            
-            OpType.BIT_AND -> MaidValue.IntVal(left.asInt() and right.asInt())
-            OpType.BIT_OR -> MaidValue.IntVal(left.asInt() or right.asInt())
-            OpType.BIT_XOR -> MaidValue.IntVal(left.asInt() xor right.asInt())
-            
-            else -> throw RuntimeException("Unsupported binary operator: $op")
-        }
-    }
-
-    private fun compareValues(left: MaidValue, right: MaidValue): Int {
-        return when {
-            left is MaidValue.IntVal && right is MaidValue.IntVal -> left.value.compareTo(right.value)
-            left is MaidValue.FloatVal || right is MaidValue.FloatVal -> left.asFloat().compareTo(right.asFloat())
-            left is MaidValue.StringVal && right is MaidValue.StringVal -> left.value.compareTo(right.value)
-            left is MaidValue.CharVal && right is MaidValue.CharVal -> left.value.compareTo(right.value)
-            else -> left.toString().compareTo(right.toString())
-        }
-    }
+    private fun applyBinaryOp(op: OpType, left: MaidValue, right: MaidValue): MaidValue =
+        evalBinaryOp(op, left, right)
 
     private fun applyUnaryOp(op: OpType, value: MaidValue, argNode: AstNode, scope: Scope): MaidValue {
         return when (op) {
@@ -359,4 +316,74 @@ class Interpreter(
             else -> throw RuntimeException("Unsupported unary operator: $op")
         }
     }
+}
+
+internal fun evalBinaryOp(op: OpType, left: MaidValue, right: MaidValue): MaidValue {
+    return when (op) {
+        OpType.ADD -> {
+            if (left is MaidValue.StringVal || right is MaidValue.StringVal) {
+                MaidValue.StringVal(left.displayString() + right.displayString())
+            } else if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) {
+                MaidValue.FloatVal(left.asFloat() + right.asFloat())
+            } else {
+                MaidValue.IntVal(left.asInt() + right.asInt())
+            }
+        }
+        OpType.SUB -> if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) MaidValue.FloatVal(left.asFloat() - right.asFloat()) else MaidValue.IntVal(left.asInt() - right.asInt())
+        OpType.MUL -> if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) MaidValue.FloatVal(left.asFloat() * right.asFloat()) else MaidValue.IntVal(left.asInt() * right.asInt())
+        OpType.DIV -> {
+            if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) {
+                MaidValue.FloatVal(left.asFloat() / right.asFloat())
+            } else {
+                val l = left.asInt()
+                val r = right.asInt()
+                check(r != 0) { "Division by zero" }
+                MaidValue.IntVal(if (l == Int.MIN_VALUE && r == -1) Int.MIN_VALUE else l / r)
+            }
+        }
+        OpType.MOD -> {
+            if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) {
+                MaidValue.FloatVal(left.asFloat() % right.asFloat())
+            } else {
+                val l = left.asInt()
+                val r = right.asInt()
+                check(r != 0) { "Modulo by zero" }
+                MaidValue.IntVal(if (l == Int.MIN_VALUE && r == -1) 0 else l % r)
+            }
+        }
+        OpType.EQUAL -> MaidValue.IntVal(if (maidValuesEqual(left, right)) 1 else 0)
+        OpType.NOT_EQUAL -> MaidValue.IntVal(if (!maidValuesEqual(left, right)) 1 else 0)
+        OpType.GREATER -> MaidValue.IntVal(if (!hasNaN(left, right) && compareMaidValues(left, right) > 0) 1 else 0)
+        OpType.LESS -> MaidValue.IntVal(if (!hasNaN(left, right) && compareMaidValues(left, right) < 0) 1 else 0)
+        OpType.GREATER_EQUAL -> MaidValue.IntVal(if (!hasNaN(left, right) && compareMaidValues(left, right) >= 0) 1 else 0)
+        OpType.LESS_EQUAL -> MaidValue.IntVal(if (!hasNaN(left, right) && compareMaidValues(left, right) <= 0) 1 else 0)
+        OpType.LOGICAL_AND -> MaidValue.IntVal(if (left.asBool() && right.asBool()) 1 else 0)
+        OpType.LOGICAL_OR -> MaidValue.IntVal(if (left.asBool() || right.asBool()) 1 else 0)
+        OpType.BIT_AND -> MaidValue.IntVal(left.asInt() and right.asInt())
+        OpType.BIT_OR -> MaidValue.IntVal(left.asInt() or right.asInt())
+        OpType.BIT_XOR -> MaidValue.IntVal(left.asInt() xor right.asInt())
+        else -> throw RuntimeException("Unsupported binary operator: $op")
+    }
+}
+
+private fun hasNaN(left: MaidValue, right: MaidValue): Boolean =
+    (left is MaidValue.FloatVal && left.value.isNaN()) || (right is MaidValue.FloatVal && right.value.isNaN())
+
+internal fun maidValuesEqual(left: MaidValue, right: MaidValue): Boolean = when {
+    left === MaidValue.NullVal || right === MaidValue.NullVal -> left === right
+    left is MaidValue.IntVal && right is MaidValue.IntVal -> left.value == right.value
+    (left is MaidValue.FloatVal || right is MaidValue.FloatVal) &&
+        (left is MaidValue.IntVal || left is MaidValue.FloatVal) &&
+        (right is MaidValue.IntVal || right is MaidValue.FloatVal) -> left.asFloat() == right.asFloat()
+    left is MaidValue.StringVal && right is MaidValue.StringVal -> left.value == right.value
+    left is MaidValue.CharVal && right is MaidValue.CharVal -> left.value == right.value
+    else -> left == right
+}
+
+internal fun compareMaidValues(left: MaidValue, right: MaidValue): Int = when {
+    left is MaidValue.IntVal && right is MaidValue.IntVal -> left.value.compareTo(right.value)
+    left is MaidValue.FloatVal || right is MaidValue.FloatVal -> left.asFloat().compareTo(right.asFloat())
+    left is MaidValue.StringVal && right is MaidValue.StringVal -> left.value.compareTo(right.value)
+    left is MaidValue.CharVal && right is MaidValue.CharVal -> left.value.compareTo(right.value)
+    else -> left.displayString().compareTo(right.displayString())
 }

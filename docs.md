@@ -222,7 +222,7 @@ gradle linkReleaseExecutableHost
 ./build/bin/host/releaseExecutable/maidLang.kexe sum.mlbc
 ```
 
-程序输出 `=> IntVal(value=10)`。Windows 上的可执行文件名为 `maidLang.exe`。`--compile` 可接收第二个路径参数指定输出文件，默认在源文件旁生成同名的 `.mlbc`。文件加载和执行失败时，命令行返回退出码 `1`。VM 的二元算术目前按整数计算，编译模式可以用 `return` 输出验证结果。VM 支持脚本顶层定义的普通函数和通过 `external fun` 声明的宿主函数。解释器的内置 `println`、嵌套函数与闭包尚不支持编译。
+程序输出 `=> IntVal(value=10)`。Windows 上的可执行文件名为 `maidLang.exe`。`--compile` 可接收第二个路径参数指定输出文件，默认在源文件旁生成同名的 `.mlbc`。文件加载和执行失败时，命令行返回退出码 `1`。VM 与解释器共享 `int`、`float`、`string`、`char` 的二元运算和比较语义，编译模式可以用 `return` 输出验证结果。VM 支持脚本顶层定义的普通函数和通过 `external fun` 声明的宿主函数。解释器的内置 `println`、嵌套函数与闭包尚不支持编译。
 
 普通函数可以在定义前调用，也可以递归调用。每次调用都有独立的参数和局部变量。`return` 会把结果交给调用方，并恢复本次调用前的操作数栈深度。循环中单独写 `f();` 时，编译器会丢弃未使用的结果。
 

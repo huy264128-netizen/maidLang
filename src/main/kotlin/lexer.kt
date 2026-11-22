@@ -109,6 +109,14 @@ fun lexer(rawText: String): MutableList<Token> {
                     state = LexState.FLOAT
                     continue
                 }
+                if (character == '\'' || character == '"') {
+                    flushToken(LexState.INTEGER)
+                    state = when (character) {
+                        '\'' -> LexState.CHAR
+                        else -> LexState.STRING
+                    }
+                    continue
+                }
                 if (operators.contains(character) || whiteSpace.contains(character)) {
                     flushToken(LexState.INTEGER)
                     if (operators.contains(character)) {
@@ -124,6 +132,14 @@ fun lexer(rawText: String): MutableList<Token> {
             }
 
             LexState.FLOAT -> {
+                if (character == '\'' || character == '"') {
+                    flushToken(LexState.FLOAT)
+                    state = when (character) {
+                        '\'' -> LexState.CHAR
+                        else -> LexState.STRING
+                    }
+                    continue
+                }
                 if (operators.contains(character) || whiteSpace.contains(character)) {
                     flushToken(LexState.FLOAT)
                     if (operators.contains(character)) {

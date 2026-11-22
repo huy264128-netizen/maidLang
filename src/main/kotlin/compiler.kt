@@ -54,13 +54,32 @@ class CompilationContext {
     /** 当前正在编译的字节码块。 */
     val chunk = BytecodeChunk()
     
-    /** 全局变量名到常量池索引的映射（临时方案）。 */
-    private val globalVarIndices = mutableMapOf<String, Int>()
+    /** 顶层代码块/循环的词法作用域栈，隔离嵌套块声明，同时保持顶层槽位对函数可见。 */
+    private val globalScopes = mutableListOf<MutableMap<String, Int>>(mutableMapOf())
     private var nextVarIndex = 0
+
+    internal fun enterGlobalScope() {
+        globalScopes.add(mutableMapOf())
+    }
+
+    internal fun exitGlobalScope() {
+        globalScopes.removeLast()
+    }
+
+    internal fun declareGlobal(name: String): Int {
+        return globalScopes.last().getOrPut(name) { nextVarIndex++ }
+    }
+
+    internal fun findGlobal(name: String): Int? {
+        for (index in globalScopes.indices.reversed()) {
+            globalScopes[index][name]?.let { return it }
+        }
+        return null
+    }
     
     /** 获取或分配一个全局变量的索引。 */
     fun getOrAllocVarIndex(name: String): Int {
-        return globalVarIndices.getOrPut(name) { nextVarIndex++ }
+        return findGlobal(name) ?: globalScopes.first().getOrPut(name) { nextVarIndex++ }
     }
     
     /** 常量池快捷方法。 */
@@ -163,13 +182,41 @@ class Compiler {
                 context.chunk.emit(opcode)
             }
             is AstNode.Unary -> {
-                compileNode(node.arg, context)
-                val opcode = when (node.op) {
-                    OpType.NOT -> Opcode.NOT
-                    OpType.SUB -> Opcode.NEGATE  // 负号
+                when (node.op) {
+                    OpType.NOT -> {
+                        compileNode(node.arg, context)
+                        context.chunk.emit(Opcode.NOT)
+                    }
+                    OpType.SUB -> {
+                        compileNode(node.arg, context)
+                        context.chunk.emit(Opcode.NEGATE)  // 负号
+                    }
+                    OpType.SELF_ADD, OpType.SELF_MINUS -> {
+                        val target = node.arg as? AstNode.Variable
+                            ?: throw IllegalStateException("${if (node.op == OpType.SELF_ADD) "++" else "--"} requires a variable")
+                        require(target.name != "true" && target.name != "false") {
+                            "Cannot mutate boolean literal '${target.name}'"
+                        }
+                        val slot = context.findLocal(target.name)
+                        val op = if (node.op == OpType.SELF_ADD) Opcode.ADD else Opcode.SUB
+                        val oneConst = context.addConstant(MaidValue.IntVal(1))
+                        if (slot == null) {
+                            val varIndex = context.getOrAllocVarIndex(target.name)
+                            context.chunk.emit(Opcode.LOAD_VAR, varIndex)
+                            context.chunk.emit(Opcode.LOAD_INT, oneConst)
+                            context.chunk.emit(op)
+                            context.chunk.emit(Opcode.STORE_VAR, varIndex)
+                            if (wantValue) context.chunk.emit(Opcode.LOAD_VAR, varIndex)
+                        } else {
+                            context.chunk.emit(Opcode.LOAD_LOCAL, slot)
+                            context.chunk.emit(Opcode.LOAD_INT, oneConst)
+                            context.chunk.emit(op)
+                            context.chunk.emit(Opcode.STORE_LOCAL, slot)
+                            if (wantValue) context.chunk.emit(Opcode.LOAD_LOCAL, slot)
+                        }
+                    }
                     else -> throw IllegalArgumentException("Unsupported unary operator: ${node.op}")
                 }
-                context.chunk.emit(opcode)
             }
             is AstNode.Assign -> {
                 // 赋值：先编译右值，然后存储到左值变量
@@ -179,7 +226,7 @@ class Compiler {
                     compileNode(node.right, context)
                     val slot = if (node.declaration) context.declareLocal(node.left.name) else context.findLocal(node.left.name)
                     if (slot == null) {
-                        val varIndex = context.getOrAllocVarIndex(node.left.name)
+                        val varIndex = if (node.declaration && !context.inFunction) context.declareGlobal(node.left.name) else context.getOrAllocVarIndex(node.left.name)
                         context.chunk.emit(Opcode.STORE_VAR, varIndex)
                         if (wantValue && !node.declaration) context.chunk.emit(Opcode.LOAD_VAR, varIndex)
                     } else {
@@ -192,13 +239,16 @@ class Compiler {
             }
             is AstNode.CodeBlock -> {
                 val localScope = context.inFunction
+                val nestedGlobalScope = !localScope && !topLevel
                 if (localScope) context.enterScope()
+                else if (nestedGlobalScope) context.enterGlobalScope()
                 val lastStatement = node.codes.indexOfLast { it !is AstNode.ExternalFuncDecl && it !is AstNode.FuncDefNode }
                 for ((index, stmt) in node.codes.withIndex()) {
                     val declaration = stmt is AstNode.ExternalFuncDecl || stmt is AstNode.FuncDefNode
                     compileNode(stmt, context, topLevel && declaration, wantValue && index == lastStatement)
                 }
                 if (localScope) context.exitScope()
+                else if (nestedGlobalScope) context.exitGlobalScope()
             }
             is AstNode.If -> {
                 // 条件跳转：先编译条件表达式
@@ -240,6 +290,7 @@ class Compiler {
             is AstNode.For -> {
                 val localScope = context.inFunction
                 if (localScope) context.enterScope()
+                else context.enterGlobalScope()
                 node.initializer?.let { compileNode(it, context, wantValue = false) }
 
                 val loopStart = context.chunk.code.size
@@ -262,6 +313,7 @@ class Compiler {
                 val afterLoop = context.chunk.code.size
                 context.chunk.code[jumpIfFalsePos + 1] = afterLoop
                 if (localScope) context.exitScope()
+                else context.exitGlobalScope()
             }
             is AstNode.FuncDefNode -> {
                 require(topLevel) { "Function definitions must be at the top level in compiled mode" }
@@ -305,7 +357,8 @@ class Compiler {
 
     private fun producesValue(node: AstNode): Boolean = when (node) {
         is AstNode.IntNode, is AstNode.FloatNode, is AstNode.CharNode, is AstNode.StringNode,
-        is AstNode.Variable, is AstNode.Unary, is AstNode.BinaryOp, is AstNode.FuncCall -> true
+        is AstNode.Variable, is AstNode.BinaryOp, is AstNode.FuncCall -> true
+        is AstNode.Unary -> node.op != OpType.SELF_ADD && node.op != OpType.SELF_MINUS
         else -> false
     }
 }
