@@ -25,6 +25,7 @@ kotlin {
     hostTarget.binaries.executable {
         baseName = "maidLang"
         entryPoint = "main"
+        freeCompilerArgs += listOf("-Xklib-duplicated-unique-name-strategy=allow-first-with-warning")
     }
 
     sourceSets.commonMain {

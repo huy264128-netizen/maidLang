@@ -14,6 +14,43 @@ import BytecodeChunk
  * 编译上下文，记录编译过程中的状态。
  */
 class CompilationContext {
+    internal val externalFunctions = mutableMapOf<String, NativeSignature>()
+    internal val functions = mutableMapOf<String, AstNode.FuncDefNode>()
+    internal val functionIndices = mutableMapOf<String, Int>()
+    private val localScopes = mutableListOf<MutableMap<String, Int>>()
+    internal var localCount = 0
+        private set
+
+    internal fun beginFunction(parameters: List<String>) {
+        localCount = 0
+        enterScope()
+        for (name in parameters) declareLocal(name)
+    }
+
+    internal fun enterScope() {
+        localScopes.add(mutableMapOf())
+    }
+
+    internal fun exitScope() {
+        localScopes.removeLast()
+    }
+
+    internal fun declareLocal(name: String): Int? {
+        val scope = localScopes.lastOrNull() ?: return null
+        require(name !in scope) { "Local variable '$name' is already declared in this scope" }
+        val slot = localCount++
+        scope[name] = slot
+        return slot
+    }
+
+    internal fun findLocal(name: String): Int? {
+        for (index in localScopes.indices.reversed()) {
+            localScopes[index][name]?.let { return it }
+        }
+        return null
+    }
+
+    internal val inFunction get() = localScopes.isNotEmpty()
     /** 当前正在编译的字节码块。 */
     val chunk = BytecodeChunk()
     
@@ -34,16 +71,43 @@ class CompilationContext {
  * 编译器主类。
  */
 class Compiler {
-    private val context = CompilationContext()
-    
     /** 编译一个 AST 节点，返回生成的字节码块。 */
     fun compile(node: AstNode): BytecodeChunk {
-        compileNode(node)
+        val context = CompilationContext()
+        val declarations = if (node is AstNode.CodeBlock) node.codes else listOf(node)
+        for (function in declarations.filterIsInstance<AstNode.FuncDefNode>()) {
+            require(function.name !in context.functions) { "Function '${function.name}' is already declared" }
+            context.functionIndices[function.name] = context.functions.size
+            context.functions[function.name] = function
+        }
+        for (declaration in declarations.filterIsInstance<AstNode.ExternalFuncDecl>()) {
+            require(declaration.name !in context.externalFunctions && declaration.name !in context.functions) {
+                "External function '${declaration.name}' is already declared"
+            }
+            context.externalFunctions[declaration.name] = NativeSignature(
+                declaration.paramTypes.map(NativeType::fromType),
+                NativeType.fromType(declaration.returnType)
+            )
+        }
+        compileNode(node, context, topLevel = true)
+        for (function in context.functions.values) {
+            val entry = context.chunk.code.size
+            context.beginFunction(function.args)
+            compileNode(function.body, context)
+            context.chunk.emit(Opcode.RETURN)
+            context.chunk.functions.add(CompiledFunction(entry, function.args.size, context.localCount))
+            context.exitScope()
+        }
         return context.chunk
     }
     
     /** 递归编译节点。 */
-    private fun compileNode(node: AstNode) {
+    private fun compileNode(
+        node: AstNode,
+        context: CompilationContext,
+        topLevel: Boolean = false,
+        wantValue: Boolean = true
+    ) {
         when (node) {
             is AstNode.IntNode -> {
                 val constIndex = context.addConstant(MaidValue.IntVal(node.value))
@@ -62,14 +126,20 @@ class Compiler {
                 context.chunk.emit(Opcode.LOAD_CHAR, constIndex)
             }
             is AstNode.Variable -> {
-                // 加载变量的值（假设为全局变量）
-                val varIndex = context.getOrAllocVarIndex(node.name)
-                context.chunk.emit(Opcode.LOAD_VAR, varIndex)
+                when (node.name) {
+                    "true" -> context.chunk.emit(Opcode.LOAD_TRUE)
+                    "false" -> context.chunk.emit(Opcode.LOAD_FALSE)
+                    else -> {
+                        val slot = context.findLocal(node.name)
+                        if (slot == null) context.chunk.emit(Opcode.LOAD_VAR, context.getOrAllocVarIndex(node.name))
+                        else context.chunk.emit(Opcode.LOAD_LOCAL, slot)
+                    }
+                }
             }
             is AstNode.BinaryOp -> {
                 // 先编译左操作数，再编译右操作数
-                compileNode(node.arg1)
-                compileNode(node.arg2)
+                compileNode(node.arg1, context)
+                compileNode(node.arg2, context)
                 // 根据操作符生成对应的字节码
                 val opcode = when (node.op) {
                     OpType.ADD -> Opcode.ADD
@@ -93,7 +163,7 @@ class Compiler {
                 context.chunk.emit(opcode)
             }
             is AstNode.Unary -> {
-                compileNode(node.arg)
+                compileNode(node.arg, context)
                 val opcode = when (node.op) {
                     OpType.NOT -> Opcode.NOT
                     OpType.SUB -> Opcode.NEGATE  // 负号
@@ -105,29 +175,39 @@ class Compiler {
                 // 赋值：先编译右值，然后存储到左值变量
                 // 左值目前只支持 Variable 节点（暂不考虑 ProxyVar）
                 if (node.left is AstNode.Variable) {
-                    compileNode(node.right)
-                    val varIndex = context.getOrAllocVarIndex((node.left as AstNode.Variable).name)
-                    context.chunk.emit(Opcode.STORE_VAR, varIndex)
+                    require(node.left.name != "true" && node.left.name != "false") { "Cannot assign to a boolean literal" }
+                    compileNode(node.right, context)
+                    val slot = if (node.declaration) context.declareLocal(node.left.name) else context.findLocal(node.left.name)
+                    if (slot == null) {
+                        val varIndex = context.getOrAllocVarIndex(node.left.name)
+                        context.chunk.emit(Opcode.STORE_VAR, varIndex)
+                        if (wantValue && !node.declaration) context.chunk.emit(Opcode.LOAD_VAR, varIndex)
+                    } else {
+                        context.chunk.emit(Opcode.STORE_LOCAL, slot)
+                        if (wantValue && !node.declaration) context.chunk.emit(Opcode.LOAD_LOCAL, slot)
+                    }
                 } else {
                     throw IllegalStateException("Unsupported assignment target: ${node.left}")
                 }
             }
             is AstNode.CodeBlock -> {
-                // 代码块：依次编译每条语句，每条语句的结果会被留在栈上，但我们会弹出丢弃（除非需要保留最后的值）
-                for (stmt in node.codes) {
-                    compileNode(stmt)
-                    // 语句执行后栈顶会有一个值，如果不是最后一条语句，我们将其弹出丢弃
-                    // 这里简化：总是弹出，最后一条语句的值会保留（由调用者处理）
+                val localScope = context.inFunction
+                if (localScope) context.enterScope()
+                val lastStatement = node.codes.indexOfLast { it !is AstNode.ExternalFuncDecl && it !is AstNode.FuncDefNode }
+                for ((index, stmt) in node.codes.withIndex()) {
+                    val declaration = stmt is AstNode.ExternalFuncDecl || stmt is AstNode.FuncDefNode
+                    compileNode(stmt, context, topLevel && declaration, wantValue && index == lastStatement)
                 }
+                if (localScope) context.exitScope()
             }
             is AstNode.If -> {
                 // 条件跳转：先编译条件表达式
-                compileNode(node.condition)
+                compileNode(node.condition, context)
                 // 生成条件跳转指令，跳过 then 分支
                 val jumpIfFalsePos = context.chunk.code.size
                 context.chunk.emit(Opcode.JUMP_IF_FALSE, 0) // 偏移量占位
                 // 编译 then 分支
-                compileNode(node.thenBranch)
+                compileNode(node.thenBranch, context, wantValue = wantValue)
                 // 如果有 else 分支，需要跳过 else 分支
                 val jumpPos = context.chunk.code.size
                 context.chunk.emit(Opcode.JUMP, 0) // 占位
@@ -136,7 +216,7 @@ class Compiler {
                 context.chunk.code[jumpIfFalsePos + 1] = elseStart
                 // 编译 else 分支（如果有）
                 if (node.elseBranch != null) {
-                    compileNode(node.elseBranch)
+                    compileNode(node.elseBranch, context, wantValue = wantValue)
                 }
                 // 修正 JUMP 的偏移量，跳转到代码结尾
                 val afterElse = context.chunk.code.size
@@ -145,12 +225,12 @@ class Compiler {
             is AstNode.While -> {
                 val loopStart = context.chunk.code.size
                 // 编译条件
-                compileNode(node.condition)
+                compileNode(node.condition, context)
                 // 条件为假时跳出循环
                 val jumpIfFalsePos = context.chunk.code.size
                 context.chunk.emit(Opcode.JUMP_IF_FALSE, 0) // 占位
                 // 编译循环体
-                compileNode(node.body)
+                compileNode(node.body, context, wantValue = false)
                 // 循环体结束后跳回条件检查
                 context.chunk.emit(Opcode.JUMP, loopStart)
                 // 修正跳出偏移量
@@ -158,17 +238,14 @@ class Compiler {
                 context.chunk.code[jumpIfFalsePos + 1] = afterLoop
             }
             is AstNode.For -> {
-                // for (init; cond; inc) body
-                // 编译初始化子句
-                node.initializer?.let { compileNode(it) }
-                // 如果初始化子句产生了一个值，弹出丢弃（它不在栈上保留）
-                // 注意：compileNode 可能将结果留在栈上，需要 POP 处理
-                // 但目前的 CodeBlock 实现未处理 POP，暂不处理
+                val localScope = context.inFunction
+                if (localScope) context.enterScope()
+                node.initializer?.let { compileNode(it, context, wantValue = false) }
 
                 val loopStart = context.chunk.code.size
                 // 编译条件（条件为 null 时视为 true，但编译模式下需生成 LOAD_TRUE）
                 if (node.condition != null) {
-                    compileNode(node.condition)
+                    compileNode(node.condition, context)
                 } else {
                     context.chunk.emit(Opcode.LOAD_TRUE)
                 }
@@ -176,31 +253,59 @@ class Compiler {
                 val jumpIfFalsePos = context.chunk.code.size
                 context.chunk.emit(Opcode.JUMP_IF_FALSE, 0) // 占位
                 // 编译循环体
-                compileNode(node.body)
+                compileNode(node.body, context, wantValue = false)
                 // 编译增量子句
-                node.increment?.let { compileNode(it) }
+                node.increment?.let { compileNode(it, context, wantValue = false) }
                 // 循环体结束后跳回条件检查
                 context.chunk.emit(Opcode.JUMP, loopStart)
                 // 修正跳出偏移量
                 val afterLoop = context.chunk.code.size
                 context.chunk.code[jumpIfFalsePos + 1] = afterLoop
+                if (localScope) context.exitScope()
             }
-            is AstNode.FuncDefNode -> error("Function definitions are not supported in compiled mode")
-            is AstNode.FuncCall -> error("Function calls are not supported in compiled mode")
+            is AstNode.FuncDefNode -> {
+                require(topLevel) { "Function definitions must be at the top level in compiled mode" }
+            }
+            is AstNode.FuncCall -> {
+                val function = context.functions[node.funName]
+                val signature = context.externalFunctions[node.funName]
+                val arity = function?.args?.size ?: signature?.parameters?.size
+                    ?: error("Function '${node.funName}' is not defined or declared in compiled mode")
+                require(node.args.size == arity) {
+                    "Function '${node.funName}' expects $arity arguments, got ${node.args.size}"
+                }
+                for (arg in node.args) compileNode(arg, context)
+                if (function != null) {
+                    context.chunk.emit(Opcode.CALL, context.functionIndices.getValue(node.funName))
+                } else {
+                    val nameIndex = context.addConstant(MaidValue.StringVal(node.funName))
+                    val signatureIndex = context.addConstant(MaidValue.StringVal(checkNotNull(signature).encode()))
+                    context.chunk.emit(Opcode.CALL_NATIVE, nameIndex, signatureIndex)
+                }
+            }
             is AstNode.Return -> {
                 // 返回值：编译返回值表达式，然后发出 RETURN 指令
                 if (node.value != null) {
-                    compileNode(node.value)
+                    compileNode(node.value, context)
                 } else {
                     context.chunk.emit(Opcode.LOAD_NULL)
                 }
                 context.chunk.emit(Opcode.RETURN)
             }
-            is AstNode.ExternalFuncDecl -> error("External functions are not supported in compiled mode")
+            is AstNode.ExternalFuncDecl -> {
+                require(topLevel) { "External function declarations must be at the top level in compiled mode" }
+            }
             is AstNode.ProxyVar -> {
                 // 数组/代理访问：暂不实现
                 throw IllegalStateException("ProxyVar compilation not implemented")
             }
         }
+        if (!wantValue && producesValue(node)) context.chunk.emit(Opcode.POP)
+    }
+
+    private fun producesValue(node: AstNode): Boolean = when (node) {
+        is AstNode.IntNode, is AstNode.FloatNode, is AstNode.CharNode, is AstNode.StringNode,
+        is AstNode.Variable, is AstNode.Unary, is AstNode.BinaryOp, is AstNode.FuncCall -> true
+        else -> false
     }
 }

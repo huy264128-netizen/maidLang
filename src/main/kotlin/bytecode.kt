@@ -21,6 +21,9 @@ enum class Opcode(val value: Int) {
     // 变量存取
     LOAD_VAR(10),
     STORE_VAR(11),
+    LOAD_LOCAL(12),
+    STORE_LOCAL(13),
+    POP(14),
     
     // 二元运算
     ADD(20),
@@ -52,6 +55,7 @@ enum class Opcode(val value: Int) {
     // 函数调用
     CALL(60),
     RETURN(61),
+    CALL_NATIVE(62),
     
     // 作用域管理（暂未使用）
     ENTER_SCOPE(70),
@@ -73,17 +77,23 @@ enum class Opcode(val value: Int) {
  */
 class ConstantPool {
     private val constants = mutableListOf<MaidValue>()
+    private val indexByValue = mutableMapOf<MaidValue, Int>()
 
     internal fun append(value: MaidValue) {
+        val index = constants.size
         constants.add(value)
+        if (value !in indexByValue) {
+            indexByValue[value] = index
+        }
     }
     
     /** 添加一个常量并返回其索引（如果已存在相同值则返回现有索引）。 */
     fun addConstant(value: MaidValue): Int {
-        val index = constants.indexOfFirst { it == value }
-        if (index != -1) return index
+        indexByValue[value]?.let { return it }
+        val index = constants.size
         constants.add(value)
-        return constants.size - 1
+        indexByValue[value] = index
+        return index
     }
     
     /** 根据索引获取常量。 */
@@ -100,9 +110,14 @@ class ConstantPool {
  * 字节码块，表示一个函数或顶级代码的编译结果。
  * 包含指令序列和关联的常量池。
  */
+internal data class CompiledFunction(val entry: Int, val arity: Int, val localCount: Int)
+
+internal const val MAX_FRAME_LOCALS = 65536
+
 class BytecodeChunk(val name: String = "main") {
     val constants = ConstantPool()
     val code = mutableListOf<Int>()
+    internal val functions = mutableListOf<CompiledFunction>()
     
     /** 添加一条无操作数的指令。 */
     fun emit(op: Opcode) {
@@ -136,8 +151,13 @@ class BytecodeChunk(val name: String = "main") {
             out.append(opcode.name.padEnd(20))
             i++
             when (opcode) {
+                Opcode.CALL_NATIVE -> {
+                    val (name, signature) = nativeCall(code[i], code[i + 1])
+                    out.append(" $name ${signature.encode()}")
+                    i += 2
+                }
                 Opcode.LOAD_INT, Opcode.LOAD_FLOAT, Opcode.LOAD_STRING, Opcode.LOAD_CHAR,
-                Opcode.LOAD_VAR, Opcode.STORE_VAR,
+                Opcode.LOAD_VAR, Opcode.STORE_VAR, Opcode.LOAD_LOCAL, Opcode.STORE_LOCAL,
                 Opcode.JUMP, Opcode.JUMP_IF_TRUE, Opcode.JUMP_IF_FALSE,
                 Opcode.CALL -> {
                     val operand = code[i]

@@ -37,7 +37,7 @@ sealed class AstNode {
     data class Unary(val op: OpType, val arg: AstNode) : AstNode() //前缀表达式
     data class CodeBlock(val codes: ArrayList<AstNode>) : AstNode() //代码块
     data class ProxyVar(val name: String, val position: AstNode) : AstNode() //Kotlin 代理对象，表示name[position]
-    data class Assign(val left: AstNode, val right: AstNode) : AstNode()
+    data class Assign(val left: AstNode, val right: AstNode, val declaration: Boolean = false) : AstNode()
     data class FuncDefNode(val name: String, val args: List<String>, val body: CodeBlock) : AstNode()
     data class If(val condition: AstNode, val thenBranch: AstNode, val elseBranch: AstNode?) : AstNode()
     data class While(val condition: AstNode, val body: AstNode) : AstNode()
@@ -65,6 +65,20 @@ class parser(val rawToken: MutableList<Token>) {
     val nameTable = mutableMapOf<String, Type>()
     val funcDefine = mutableMapOf<String, Type.FunctionType>()
     var nowElement: Int = 0
+    private var nestingDepth: Int = 0
+    private val maxNestingDepth: Int = 256
+
+    private inline fun <T> withNesting(block: () -> T): T {
+        if (nestingDepth >= maxNestingDepth) {
+            throw IllegalStateException("Syntax nesting depth exceeded (max: $maxNestingDepth)")
+        }
+        nestingDepth++
+        return try {
+            block()
+        } finally {
+            nestingDepth--
+        }
+    }
 
     init {
         // 预定义布尔常量 true 和 false 为 int 类型，值分别为 1 和 0
@@ -190,7 +204,7 @@ class parser(val rawToken: MutableList<Token>) {
         }
         consumeOperator(";")
         nameTable[name] = type
-        return AstNode.Assign(AstNode.Variable(name), initExpr)
+        return AstNode.Assign(AstNode.Variable(name), initExpr, declaration = true)
     }
 
     private fun variableDeclaration(): AstNode {
@@ -215,7 +229,7 @@ class parser(val rawToken: MutableList<Token>) {
         }
 
         nameTable[name] = inferredType
-        return AstNode.Assign(AstNode.Variable(name), initExpr)
+        return AstNode.Assign(AstNode.Variable(name), initExpr, declaration = true)
     }
 
     private fun functionDeclaration(): AstNode {
@@ -329,7 +343,7 @@ class parser(val rawToken: MutableList<Token>) {
     }
 
     /** If 语句 - if (expr) stmt [else stmt] */
-    fun ifStatement(): AstNode {
+    fun ifStatement(): AstNode = withNesting {
         consumeIdentifier("if")
         consumeOperator("(")
         val condition = expression()
@@ -339,17 +353,17 @@ class parser(val rawToken: MutableList<Token>) {
             consumeIdentifier("else")
             statement()
         } else null
-        return AstNode.If(condition, thenBranch, elseBranch)
+        AstNode.If(condition, thenBranch, elseBranch)
     }
 
     /** While 语句 - while (expr) stmt */
-    fun whileStatement(): AstNode {
+    fun whileStatement(): AstNode = withNesting {
         consumeIdentifier("while")
         consumeOperator("(")
         val condition = expression()
         consumeOperator(")")
         val body = statement()
-        return AstNode.While(condition, body)
+        AstNode.While(condition, body)
     }
 
     /**
@@ -361,7 +375,7 @@ class parser(val rawToken: MutableList<Token>) {
      *   for (i = 0; i < 10; ++i) { ... }
      *   for (;;) { ... }  // 无限循环
      */
-    fun forStatement(): AstNode {
+    fun forStatement(): AstNode = withNesting {
         consumeIdentifier("for")
         consumeOperator("(")
 
@@ -377,7 +391,7 @@ class parser(val rawToken: MutableList<Token>) {
                     null
                 }
                 nameTable[name] = type
-                AstNode.Assign(AstNode.Variable(name), initExpr ?: AstNode.IntNode(0))
+                AstNode.Assign(AstNode.Variable(name), initExpr ?: AstNode.IntNode(0), declaration = true)
             }
             check(LexState.IDENTIFIER, "var") -> {
                 // var 变量声明：var i = 0
@@ -396,7 +410,7 @@ class parser(val rawToken: MutableList<Token>) {
                     else -> Type.KotlinType
                 }
                 nameTable[name] = inferredType
-                AstNode.Assign(AstNode.Variable(name), initExpr)
+                AstNode.Assign(AstNode.Variable(name), initExpr, declaration = true)
             }
             !check(LexState.OPERATOR, ";") -> {
                 // 表达式
@@ -422,7 +436,7 @@ class parser(val rawToken: MutableList<Token>) {
         consumeOperator(")")
 
         val body = statement()
-        return AstNode.For(initializer, condition, increment, body)
+        AstNode.For(initializer, condition, increment, body)
     }
 
     fun returnStatement(): AstNode {
@@ -433,14 +447,14 @@ class parser(val rawToken: MutableList<Token>) {
     }
 
     /** 代码块：解析 { 语句1; 语句2; ... } */
-    fun codeBlock(): AstNode.CodeBlock {
+    fun codeBlock(): AstNode.CodeBlock = withNesting {
         consumeOperator("{")
         val codes = arrayListOf<AstNode>()
         while (!isAtEnd() && !check(LexState.OPERATOR, "}")) {
             codes.add(declaration())
         }
         consumeOperator("}")
-        return AstNode.CodeBlock(codes)
+        AstNode.CodeBlock(codes)
     }
 
     /** 表达式语句：解析 expression() 并消耗末尾的分号 */
@@ -542,8 +556,8 @@ class parser(val rawToken: MutableList<Token>) {
     }
 
     /** 优先级 9: 前缀一元运算 (!, -, ++, --) */
-    fun unary(): AstNode {
-        return when {
+    fun unary(): AstNode = withNesting {
+        when {
             match(LexState.OPERATOR, "!") -> AstNode.Unary(OpType.NOT, unary())
             match(LexState.OPERATOR, "-") -> AstNode.Unary(OpType.SUB, unary())
             match(LexState.OPERATOR, "++") -> AstNode.Unary(OpType.SELF_ADD, unary())
@@ -570,9 +584,11 @@ class parser(val rawToken: MutableList<Token>) {
             LexState.OPERATOR -> {
                 if (current.value == "(") {
                     nowElement++
-                    val node = expression()
-                    consume(Token(LexState.OPERATOR, ")"))
-                    return node
+                    return withNesting {
+                        val node = expression()
+                        consume(Token(LexState.OPERATOR, ")"))
+                        node
+                    }
                 } else {
                     throw IllegalArgumentException("Unexpected operator '${current.value}' in primary expression")
                 }

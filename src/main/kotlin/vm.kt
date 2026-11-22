@@ -13,30 +13,60 @@ import OpType
 import AstNode
 import Scope
 
+private val EMPTY_LOCALS = emptyArray<MaidValue>()
+
 /**
  * 调用帧，表示一个函数的执行上下文。
  */
 private class Frame(
-    val chunk: BytecodeChunk,           // 所属的字节码块
-    val locals: Array<MaidValue?>,      // 局部变量槽（初始为 null）
-    var ip: Int = 0,                    // 指令指针
-    var stackStart: Int = 0             // 该帧在操作数栈中的起始位置（用于计算相对偏移）
+    val chunk: BytecodeChunk,
+    val start: Int,
+    val end: Int,
+    val stackStart: Int,
+    var ip: Int = 0,
+    val localCount: Int = 0
 ) {
+    val locals: Array<MaidValue> =
+        if (localCount == 0) EMPTY_LOCALS else Array(localCount) { MaidValue.NullVal }
+
     fun readOpcode(): Opcode = Opcode.fromValue(readInt())
-    
-    /** 读取一个字节操作数并推进 ip。 */
-    fun readByte(): Int = chunk.code[ip++]
-    
-    /** 读取一个整数操作数（实际上就是 readByte，因为操作数以 Int 存储）。 */
-    fun readInt(): Int = readByte()
+
+    fun readInt(): Int {
+        check(ip in start until end) { "Instruction operand is outside the current frame" }
+        return chunk.code[ip++]
+    }
+
+    fun jumpTo(offset: Int) {
+        check(offset in start..end) { "Jump target $offset is outside the current frame [$start, $end]" }
+        ip = offset
+    }
+
+    fun readLocalSlot(): Int = readInt().also {
+        check(it in 0 until localCount) { "Invalid local variable slot: $it" }
+    }
 }
 
 /**
  * MaidLang 虚拟机。
  */
-class VM {
-    /** 全局变量表（名称 -> 值）。 */
+class VM(
+    val nativeRegistry: NativeRegistry = NativeRegistry(),
+    val maxCallDepth: Int = 1024,
+    val maxStackSize: Int = 65536,
+    val maxInstructions: Long = Long.MAX_VALUE
+) {
+    init {
+        require(maxCallDepth > 0) { "maxCallDepth must be positive" }
+        require(maxStackSize > 0) { "maxStackSize must be positive" }
+        require(maxInstructions > 0) { "maxInstructions must be positive" }
+    }
+
+    /** 宿主显式定义的全局变量表（名称 -> 值）。 */
     private val globals = mutableMapOf<String, MaidValue>()
+
+    /** 单次执行期间的按槽位全局变量表（执行结束自动清空，避免跨次运行泄漏）。 */
+    private val globalSlots = mutableMapOf<Int, MaidValue>()
+    private var executing = false
     
     /** 操作数栈。 */
     private val stack = ArrayDeque<MaidValue>()
@@ -44,15 +74,14 @@ class VM {
     /** 调用栈。 */
     private val callStack = ArrayDeque<Frame>()
     
-    /** 当前帧（callStack 顶部）。 */
-    private var currentFrame: Frame? = null
-    
-    /** 是否正在运行。 */
-    private var running = false
-    
     /** 定义全局变量。 */
     fun defineGlobal(name: String, value: MaidValue) {
         globals[name] = value
+    }
+
+    /** Registers a host function referenced by a compiled external fun declaration. */
+    fun registerNative(name: String, func: NativeFunction) {
+        nativeRegistry.register(name, func)
     }
     
     /**
@@ -68,27 +97,53 @@ class VM {
         }
     }
 
-    internal fun execute(chunk: BytecodeChunk): MaidValue {
-        // 创建初始帧（无参数，无局部变量）
-        val frame = Frame(chunk, arrayOf())
-        stack.clear()
-        callStack.clear()
-        callStack.addLast(frame)
-        currentFrame = frame
-        running = true
-        
-        // 主执行循环
-        while (running && callStack.isNotEmpty()) {
-            val frame = callStack.last()
-            if (frame.ip == frame.chunk.code.size) break
-            currentFrame = frame
-            executeInstruction(frame)
+    /** Executes bytecode and reports errors to the host as exceptions. */
+    fun execute(chunk: BytecodeChunk): MaidValue {
+        check(!executing) { "The same VM cannot run another program during a native call" }
+        executing = true
+        try {
+            return runChunk(chunk)
+        } finally {
+            stack.clear()
+            callStack.clear()
+            globalSlots.clear()
+            executing = false
         }
-        
-        // 执行结束时栈顶应保存返回值
-        return if (stack.isNotEmpty()) stack.last() else MaidValue.NullVal
     }
-    
+
+    private fun runChunk(chunk: BytecodeChunk): MaidValue {
+        val mainEnd = chunk.functions.firstOrNull()?.entry ?: chunk.code.size
+        callStack.addLast(Frame(chunk, start = 0, end = mainEnd, stackStart = 0))
+        var instructions = 0L
+        while (callStack.isNotEmpty()) {
+            val frame = callStack.last()
+            if (frame.ip == frame.end) finishFrame(frame)
+            else {
+                check(instructions < maxInstructions) { "Instruction limit exceeded (max: $maxInstructions)" }
+                instructions++
+                executeInstruction(frame)
+            }
+        }
+        return stack.lastOrNull() ?: MaidValue.NullVal
+    }
+
+    private fun push(value: MaidValue) {
+        check(stack.size < maxStackSize) { "Operand stack overflow (max size: $maxStackSize)" }
+        stack.addLast(value)
+    }
+
+    private fun pop(frame: Frame): MaidValue {
+        check(stack.size > frame.stackStart) { "Operand stack underflow" }
+        return stack.removeLast()
+    }
+
+    private fun finishFrame(frame: Frame) {
+        val result = if (stack.size > frame.stackStart) pop(frame) else MaidValue.NullVal
+        while (stack.size > frame.stackStart) pop(frame)
+        callStack.removeLast()
+        push(result)
+    }
+
     /**
      * 执行当前帧的一条指令。
      */
@@ -99,195 +154,225 @@ class VM {
             Opcode.LOAD_INT -> {
                 val constIndex = frame.readInt()
                 val value = frame.chunk.constants.getConstant(constIndex)
-                stack.addLast(value)
+                push(value)
             }
             Opcode.LOAD_FLOAT, Opcode.LOAD_STRING, Opcode.LOAD_CHAR -> {
                 // 与 LOAD_INT 类似，只是常量类型不同
                 val constIndex = frame.readInt()
                 val value = frame.chunk.constants.getConstant(constIndex)
-                stack.addLast(value)
+                push(value)
             }
             Opcode.LOAD_NULL -> {
-                stack.addLast(MaidValue.NullVal)
+                push(MaidValue.NullVal)
             }
             Opcode.LOAD_TRUE -> {
-                stack.addLast(MaidValue.IntVal(1))
+                push(MaidValue.IntVal(1))
             }
             Opcode.LOAD_FALSE -> {
-                stack.addLast(MaidValue.IntVal(0))
+                push(MaidValue.IntVal(0))
             }
             
-            // 变量存取（简化版：仅支持全局变量，通过名称查找）
+            // 变量存取
             Opcode.LOAD_VAR -> {
                 val varIndex = frame.readInt()
-                // TODO: 目前假设变量索引对应全局变量名称，临时实现为通过索引映射
-                // 这里简化：直接使用索引作为变量名（仅用于演示）
-                val name = "var$varIndex"
-                val value = globals[name] ?: MaidValue.NullVal
-                stack.addLast(value)
+                val value = globalSlots[varIndex]
+                    ?: (if (globals.isEmpty()) null else globals["var$varIndex"])
+                    ?: MaidValue.NullVal
+                push(value)
             }
             Opcode.STORE_VAR -> {
                 val varIndex = frame.readInt()
-                val value = stack.removeLast()
-                val name = "var$varIndex"
-                globals[name] = value
+                val value = pop(frame)
+                globalSlots[varIndex] = value
             }
             
+            Opcode.LOAD_LOCAL -> {
+                val slot = frame.readLocalSlot()
+                push(frame.locals[slot])
+            }
+            Opcode.STORE_LOCAL -> frame.locals[frame.readLocalSlot()] = pop(frame)
+            Opcode.POP -> pop(frame)
+
             // 二元运算
             Opcode.ADD -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.ADD, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.SUB -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.SUB, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.MUL -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.MUL, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.DIV -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.DIV, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.MOD -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.MOD, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.GREATER -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.GREATER, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.LESS -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.LESS, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.GREATER_EQUAL -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.GREATER_EQUAL, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.LESS_EQUAL -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.LESS_EQUAL, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.EQUAL -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.EQUAL, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.NOT_EQUAL -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.NOT_EQUAL, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.LOGICAL_AND -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.LOGICAL_AND, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.LOGICAL_OR -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.LOGICAL_OR, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.BIT_AND -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.BIT_AND, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.BIT_OR -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.BIT_OR, a, b)
-                stack.addLast(result)
+                push(result)
             }
             Opcode.BIT_XOR -> {
-                val b = stack.removeLast()
-                val a = stack.removeLast()
+                val b = pop(frame)
+                val a = pop(frame)
                 val result = applyBinaryOp(OpType.BIT_XOR, a, b)
-                stack.addLast(result)
+                push(result)
             }
             
             // 一元运算
             Opcode.NEGATE -> {
-                val value = stack.removeLast()
+                val value = pop(frame)
                 val result = applyUnaryOp(OpType.SUB, value, null, null) // 使用 SUB 作为负号（需特殊处理）
-                stack.addLast(result)
+                push(result)
             }
             Opcode.NOT -> {
-                val value = stack.removeLast()
+                val value = pop(frame)
                 val result = applyUnaryOp(OpType.NOT, value, null, null)
-                stack.addLast(result)
+                push(result)
             }
             
             // 控制流
             Opcode.JUMP -> {
                 val offset = frame.readInt()
-                frame.ip = offset
+                frame.jumpTo(offset)
             }
             Opcode.JUMP_IF_TRUE -> {
                 val offset = frame.readInt()
-                val condition = stack.removeLast()
+                val condition = pop(frame)
                 if (condition.asInt() != 0) {
-                    frame.ip = offset
+                    frame.jumpTo(offset)
                 }
             }
             Opcode.JUMP_IF_FALSE -> {
                 val offset = frame.readInt()
-                val condition = stack.removeLast()
+                val condition = pop(frame)
                 if (condition.asInt() == 0) {
-                    frame.ip = offset
+                    frame.jumpTo(offset)
                 }
             }
             
-            // 函数调用（简化版：暂不支持）
-            Opcode.CALL -> {
-                val argCount = frame.readInt()
-                // TODO: 实现函数调用
-                println("Warning: CALL instruction not implemented")
-                // 临时：弹出参数，压入 null
-                repeat(argCount) { stack.removeLast() }
-                stack.addLast(MaidValue.NullVal)
-            }
-            Opcode.RETURN -> {
-                val returnValue = if (stack.isNotEmpty()) stack.removeLast() else MaidValue.NullVal
-                callStack.removeLast()
-                stack.addLast(returnValue)
-                if (callStack.isEmpty()) {
-                    running = false
-                }
-            }
-            
+            Opcode.CALL -> callFunction(frame)
+            Opcode.CALL_NATIVE -> callNative(frame)
+            Opcode.RETURN -> finishFrame(frame)
+
             // 其他指令暂不实现
             else -> {
                 throw IllegalStateException("Unimplemented opcode: $opcode")
             }
         }
-        // 默认情况下，指令执行完毕后 ip 已由 readInt 推进；但对于未读取操作数的指令，需要手动推进
-        // 我们的 when 分支中，所有指令都通过 readInt 或显式设置 ip 来推进，因此无需额外操作。
+    }
+
+    private fun callFunction(caller: Frame) {
+        val index = caller.readInt()
+        val function = caller.chunk.functions.getOrNull(index) ?: error("Invalid function index: $index")
+        check(callStack.size < maxCallDepth) { "Call stack overflow (max depth: $maxCallDepth)" }
+        check(function.arity >= 0 && function.localCount in function.arity..MAX_FRAME_LOCALS) {
+            "Invalid function frame size for function #$index"
+        }
+        check(stack.size - caller.stackStart >= function.arity) { "Not enough arguments for function #$index" }
+        val stackStart = stack.size - function.arity
+        val end = caller.chunk.functions.getOrNull(index + 1)?.entry ?: caller.chunk.code.size
+        check(function.entry in 0..end && end <= caller.chunk.code.size) { "Invalid function entry for function #$index" }
+        val frame = Frame(
+            caller.chunk,
+            start = function.entry,
+            end = end,
+            stackStart = stackStart,
+            ip = function.entry,
+            localCount = function.localCount
+        )
+        for (slot in function.arity - 1 downTo 0) frame.locals[slot] = pop(caller)
+        callStack.addLast(frame)
+    }
+
+    private fun callNative(frame: Frame) {
+        val (name, signature) = frame.chunk.nativeCall(frame.readInt(), frame.readInt())
+        val function = nativeRegistry[name] ?: error("External function '$name' is not registered in this VM")
+        val count = signature.parameters.size
+        check(stack.size - frame.stackStart >= count) { "Not enough arguments for external function '$name'" }
+        val start = stack.size - count
+        val args = List(count) { index ->
+            val value = stack[start + index]
+            val type = signature.parameters[index]
+            require(type.accepts(value)) { "External function '$name' argument ${index + 1} must be ${type.typeName}" }
+            value
+        }
+        repeat(count) { pop(frame) }
+        val result = function(args)
+        require(signature.result.accepts(result)) { "External function '$name' must return ${signature.result.typeName}" }
+        push(result)
     }
     
     /**
@@ -295,14 +380,23 @@ class VM {
      * 由于 interpreter.kt 中的 applyBinaryOp 是私有函数，这里临时复制一份简化实现。
      */
     private fun applyBinaryOp(op: OpType, left: MaidValue, right: MaidValue): MaidValue {
-        // 简化实现：直接调用 interpreter.kt 中的函数？因为无法直接访问，我们复制逻辑。
-        // 这里先实现一个简单版本，仅支持整数运算。
+        // 简化实现：先实现一个简单版本，仅支持整数运算。
         return when (op) {
             OpType.ADD -> MaidValue.IntVal(left.asInt() + right.asInt())
             OpType.SUB -> MaidValue.IntVal(left.asInt() - right.asInt())
             OpType.MUL -> MaidValue.IntVal(left.asInt() * right.asInt())
-            OpType.DIV -> MaidValue.IntVal(left.asInt() / right.asInt())
-            OpType.MOD -> MaidValue.IntVal(left.asInt() % right.asInt())
+            OpType.DIV -> {
+                val l = left.asInt()
+                val r = right.asInt()
+                check(r != 0) { "Division by zero" }
+                MaidValue.IntVal(if (l == Int.MIN_VALUE && r == -1) Int.MIN_VALUE else l / r)
+            }
+            OpType.MOD -> {
+                val l = left.asInt()
+                val r = right.asInt()
+                check(r != 0) { "Modulo by zero" }
+                MaidValue.IntVal(if (l == Int.MIN_VALUE && r == -1) 0 else l % r)
+            }
             OpType.GREATER -> MaidValue.IntVal(if (left.asInt() > right.asInt()) 1 else 0)
             OpType.LESS -> MaidValue.IntVal(if (left.asInt() < right.asInt()) 1 else 0)
             OpType.GREATER_EQUAL -> MaidValue.IntVal(if (left.asInt() >= right.asInt()) 1 else 0)
@@ -324,7 +418,7 @@ class VM {
     private fun applyUnaryOp(op: OpType, value: MaidValue, argNode: AstNode?, scope: Scope?): MaidValue {
         return when (op) {
             OpType.NOT -> MaidValue.IntVal(if (value.asInt() == 0) 1 else 0)
-            OpType.SUB -> MaidValue.IntVal(-value.asInt())  // 负号
+            OpType.SUB -> if (value is MaidValue.FloatVal) MaidValue.FloatVal(-value.value) else MaidValue.IntVal(-value.asInt())
             else -> MaidValue.NullVal
         }
     }

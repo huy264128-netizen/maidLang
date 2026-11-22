@@ -7,7 +7,7 @@ sealed class MaidValue {
     /** 原生函数值：由 Kotlin 宿主代码注册的外部函数，无需反射即可调用 */
     data class NativeFuncVal(
         val name: String,
-        val func: (List<MaidValue>) -> MaidValue
+        val func: NativeFunction
     ) : MaidValue()
     object NullVal : MaidValue()
 
@@ -65,20 +65,15 @@ class Scope(val parent: Scope? = null) {
 
 class ReturnException(val value: MaidValue) : RuntimeException()
 
-class Interpreter {
+class Interpreter(
+    val nativeRegistry: NativeRegistry = NativeRegistry(),
+    val maxCallDepth: Int = 256
+) {
     val globalScope = Scope()
-    /** 原生函数注册表：名称 -> (参数列表) -> MaidValue */
-    private val nativeFunctions = mutableMapOf<String, (List<MaidValue>) -> MaidValue>()
-
-    /**
-     * 注册一个原生函数，供 MaidLang 中的 external fun 声明使用。
-     * 注册后，MaidLang 代码可通过 external fun 声明后直接调用，无需反射。
-     */
-    fun registerNative(name: String, func: (List<MaidValue>) -> MaidValue) {
-        nativeFunctions[name] = func
-    }
+    private var callDepth = 0
 
     init {
+        require(maxCallDepth > 0) { "maxCallDepth must be positive" }
         // 预定义布尔常量 true 和 false
         globalScope.define("true", MaidValue.IntVal(1))
         globalScope.define("false", MaidValue.IntVal(0))
@@ -87,6 +82,14 @@ class Interpreter {
         // 内置函数 print 和 println
         globalScope.define("print", MaidValue.IntVal(0))
         globalScope.define("println", MaidValue.IntVal(0))
+    }
+
+    /**
+     * 注册一个原生函数，供 MaidLang 中的 external fun 声明使用。
+     * 注册后，MaidLang 代码可通过 external fun 声明后直接调用，无需反射。
+     */
+    fun registerNative(name: String, func: NativeFunction) {
+        nativeRegistry.register(name, func)
     }
 
     fun interpret(node: AstNode): MaidValue {
@@ -131,7 +134,13 @@ class Interpreter {
             is AstNode.Assign -> {
                 val value = eval(node.right, scope)
                 when (val left = node.left) {
-                    is AstNode.Variable -> scope.assign(left.name, value)
+                    is AstNode.Variable -> {
+                        if (node.declaration) {
+                            scope.define(left.name, value)
+                        } else {
+                            scope.assign(left.name, value)
+                        }
+                    }
                     is AstNode.ProxyVar -> {
                         // TODO: Implement proxy variable assignment if needed
                         println("Warning: ProxyVar assignment not fully implemented")
@@ -190,6 +199,9 @@ class Interpreter {
             is AstNode.FuncCall -> {
                 val funcValue = scope.get(node.funName)
                 if (funcValue is MaidValue.FunctionVal) {
+                    if (callDepth >= maxCallDepth) {
+                        throw RuntimeException("Call stack overflow (max depth: $maxCallDepth)")
+                    }
                     val funcDef = funcValue.node
                     val callScope = Scope(funcValue.closure)
                     
@@ -201,10 +213,13 @@ class Interpreter {
                         callScope.define(funcDef.args[i], eval(node.args[i], scope))
                     }
 
+                    callDepth++
                     try {
                         eval(funcDef.body, callScope)
                     } catch (e: ReturnException) {
                         e.value
+                    } finally {
+                        callDepth--
                     }
                 } else if (funcValue is MaidValue.NativeFuncVal) {
                     // 调用原生函数（免反射，直接调用 Kotlin lambda）
@@ -241,10 +256,10 @@ class Interpreter {
             
             is AstNode.ExternalFuncDecl -> {
                 // 在原生函数注册表中查找并绑定
-                val nativeFunc = nativeFunctions[node.name]
+                val nativeFunc = nativeRegistry[node.name]
                 if (nativeFunc == null) {
                     throw RuntimeException("External function '${node.name}' is not registered. " +
-                            "Use interpreter.registerNative(\"${node.name}\") { ... } in Kotlin host code.")
+                            "Use interpreter.registerNative(\"${node.name}\") { ... } or NativeRegistry.register(...) in Kotlin host code.")
                 }
                 val funcVal = MaidValue.NativeFuncVal(node.name, nativeFunc)
                 scope.define(node.name, funcVal)
@@ -275,8 +290,22 @@ class Interpreter {
             }
             OpType.SUB -> if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) MaidValue.FloatVal(left.asFloat() - right.asFloat()) else MaidValue.IntVal(left.asInt() - right.asInt())
             OpType.MUL -> if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) MaidValue.FloatVal(left.asFloat() * right.asFloat()) else MaidValue.IntVal(left.asInt() * right.asInt())
-            OpType.DIV -> if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) MaidValue.FloatVal(left.asFloat() / right.asFloat()) else MaidValue.IntVal(left.asInt() / right.asInt())
-            OpType.MOD -> MaidValue.IntVal(left.asInt() % right.asInt())
+            OpType.DIV -> {
+                if (left is MaidValue.FloatVal || right is MaidValue.FloatVal) {
+                    MaidValue.FloatVal(left.asFloat() / right.asFloat())
+                } else {
+                    val l = left.asInt()
+                    val r = right.asInt()
+                    if (r == 0) throw RuntimeException("Division by zero")
+                    MaidValue.IntVal(if (l == Int.MIN_VALUE && r == -1) Int.MIN_VALUE else l / r)
+                }
+            }
+            OpType.MOD -> {
+                val l = left.asInt()
+                val r = right.asInt()
+                if (r == 0) throw RuntimeException("Modulo by zero")
+                MaidValue.IntVal(if (l == Int.MIN_VALUE && r == -1) 0 else l % r)
+            }
             
             OpType.EQUAL -> MaidValue.IntVal(if (compareValues(left, right) == 0) 1 else 0)
             OpType.NOT_EQUAL -> MaidValue.IntVal(if (compareValues(left, right) != 0) 1 else 0)

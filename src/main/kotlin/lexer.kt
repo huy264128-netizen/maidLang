@@ -26,10 +26,10 @@ val operators = setOf(
     '?',
     '|'
 )
-val enableToLinkWithEqual = setOf("+", "-", "*", "/", "|", "%", "&", "^", "=")
+val enableToLinkWithEqual = setOf("+", "-", "*", "/", "|", "%", "&", "^", "=", "<", ">", "!")
 val enableToDouble = setOf("+", "-", "&", "|")
-val whiteSpace = setOf('\\', '"', '\'', ' ', '\n', '\t')
-val escapeCharMap = mapOf('n' to '\n', 't' to '\t', '\'' to '\'')
+val whiteSpace = setOf('\\', '"', '\'', ' ', '\n', '\r', '\t')
+val escapeCharMap = mapOf('n' to '\n', 't' to '\t', 'r' to '\r', '\'' to '\'', '"' to '"', '\\' to '\\')
 val typeKeywords = setOf("int", "float", "char", "string", "bool", "void")
 
 data class Token(val type: LexState, val value: String) //define same as state
@@ -41,21 +41,28 @@ enum class LexState(val id: Int) {
 
 fun lexer(rawText: String): MutableList<Token> {
     var state = LexState.IDLE  // 0 -> Null Statement 1-> Identify 2->Int 3->Float 4:Char 5:String 6:Operator
-    var catchSlash: Boolean = false //  捕捉到了反斜杠时为 true
-    var lexerBuffer: String = ""
+    var catchSlash = false //  捕捉到了反斜杠时为 true
+    val lexerBuffer = StringBuilder()
     val tokenList = mutableListOf<Token>()
+
+    fun flushToken(tokenState: LexState) {
+        tokenList.add(Token(tokenState, lexerBuffer.toString()))
+        lexerBuffer.clear()
+    }
+
     for (character: Char in rawText) {
 
         when (state) {
             LexState.IDLE -> {
                 when {
                     character.isDigit() -> {
-                        lexerBuffer += character
+                        lexerBuffer.append(character)
                         state = LexState.INTEGER //switch to Int mode
                     }
 
                     character == '.' -> {
-                        lexerBuffer = "."
+                        lexerBuffer.clear()
+                        lexerBuffer.append('.')
                         state = LexState.FLOAT //switch to Float mode
                     }
 
@@ -64,21 +71,20 @@ fun lexer(rawText: String): MutableList<Token> {
                     character == '"' -> state = LexState.STRING //switch to String mode
                     operators.contains(character) -> {
                         state = LexState.OPERATOR
-                        lexerBuffer += character
+                        lexerBuffer.append(character)
                     }
 
                     whiteSpace.contains(character) -> continue
                     else -> {
                         state = LexState.IDENTIFIER
-                        lexerBuffer += character
+                        lexerBuffer.append(character)
                     }//switch to Identify mode
                 }
             }
 
             LexState.IDENTIFIER -> {
                 if (character == '\'' || character == '"') {
-                    tokenList.add(Token(LexState.IDENTIFIER, lexerBuffer))
-                    lexerBuffer = ""
+                    flushToken(LexState.IDENTIFIER)
                     state = when (character) {
                         '\'' -> LexState.CHAR
                         '"' -> LexState.STRING
@@ -87,51 +93,48 @@ fun lexer(rawText: String): MutableList<Token> {
                     continue
                 }
                 if (operators.contains(character) || whiteSpace.contains(character)) {
-                    tokenList.add(Token(LexState.IDENTIFIER, lexerBuffer))
-                    lexerBuffer = ""
+                    flushToken(LexState.IDENTIFIER)
                     if (operators.contains(character)) {
-                        lexerBuffer += character
+                        lexerBuffer.append(character)
                         state = LexState.OPERATOR
                         continue
                     }
                     state = LexState.IDLE
-                } else lexerBuffer += character
+                } else lexerBuffer.append(character)
             }
 
             LexState.INTEGER -> {
                 if (character == '.' || character == 'e') {
-                    lexerBuffer += character
+                    lexerBuffer.append(character)
                     state = LexState.FLOAT
                     continue
                 }
                 if (operators.contains(character) || whiteSpace.contains(character)) {
-                    tokenList.add(Token(LexState.INTEGER, lexerBuffer))
-                    lexerBuffer = ""
+                    flushToken(LexState.INTEGER)
                     if (operators.contains(character)) {
-                        lexerBuffer += character
+                        lexerBuffer.append(character)
                         state = LexState.OPERATOR
                         continue
                     }
                     state = LexState.IDLE
                     continue
                 }
-                if (character.isDigit()) lexerBuffer += character
+                if (character.isDigit()) lexerBuffer.append(character)
                 else throw IllegalStateException("string $lexerBuffer is a illegal value")
             }
 
             LexState.FLOAT -> {
                 if (operators.contains(character) || whiteSpace.contains(character)) {
-                    tokenList.add(Token(LexState.FLOAT, lexerBuffer))
-                    lexerBuffer = ""
+                    flushToken(LexState.FLOAT)
                     if (operators.contains(character)) {
-                        lexerBuffer += character
+                        lexerBuffer.append(character)
                         state = LexState.OPERATOR
                         continue
                     }
                     state = LexState.IDLE
                     continue
                 }
-                if (character.isDigit()) lexerBuffer += character
+                if (character.isDigit()) lexerBuffer.append(character)
                 else throw IllegalStateException("string $lexerBuffer is not a illegal value")
             }
 
@@ -141,35 +144,32 @@ fun lexer(rawText: String): MutableList<Token> {
                     continue
                 }
                 val currentCharacter: Char = when (catchSlash) {
-                    true -> run {
-                        val mappedChar = escapeCharMap[character]
-                        if (mappedChar != null) return@run mappedChar
-                        return@run character
-                    }
-
+                    true -> escapeCharMap[character] ?: character
                     false -> character
                 }
 
-
                 if (character == '\'') {
                     if (catchSlash) {
-                        lexerBuffer += '\''
+                        catchSlash = false
+                        if (lexerBuffer.isNotEmpty()) {
+                            throw IllegalStateException("Type Char must have only one Character \u270B\uD83D\uDE2D\uD83E\uDD1A")
+                        }
+                        lexerBuffer.append('\'')
                         continue
                     }
                     if (lexerBuffer.length != 1) {
                         throw IllegalStateException("Type Char must have only one Character \u270B\uD83D\uDE2D\uD83E\uDD1A")
                     }
                     catchSlash = false
-                    tokenList.add(Token(LexState.CHAR, lexerBuffer))
-                    lexerBuffer = ""
+                    flushToken(LexState.CHAR)
                     state = LexState.IDLE
                     continue
                 }
-                catchSlash = false;
+                catchSlash = false
                 if (lexerBuffer.isNotEmpty()) {
                     throw IllegalStateException("Type Char must have only one Character \u270B\uD83D\uDE2D\uD83E\uDD1A")
                 } else {
-                    lexerBuffer += currentCharacter
+                    lexerBuffer.append(currentCharacter)
                 }
             }
 
@@ -179,25 +179,21 @@ fun lexer(rawText: String): MutableList<Token> {
                     continue
                 }
                 if (catchSlash) {
-                    val currentChar = escapeCharMap[character];
-                    if (currentChar != null) lexerBuffer += currentChar
-                    else lexerBuffer += character
+                    lexerBuffer.append(escapeCharMap[character] ?: character)
                     catchSlash = false
                     continue
                 }
                 if (character == '"') {
-                    tokenList.add(Token(LexState.STRING, lexerBuffer))
-                    lexerBuffer = ""
+                    flushToken(LexState.STRING)
                     state = LexState.IDLE
                     continue
                 }
-                lexerBuffer += character
+                lexerBuffer.append(character)
             }
 
             LexState.OPERATOR -> {
                 if (character == '\'' || character == '"') {
-                    tokenList.add(Token(LexState.OPERATOR, lexerBuffer))
-                    lexerBuffer = ""
+                    flushToken(LexState.OPERATOR)
                     state = when (character) {
                         '\'' -> LexState.CHAR
                         '"' -> LexState.STRING
@@ -205,56 +201,53 @@ fun lexer(rawText: String): MutableList<Token> {
                     }
                     continue
                 }
-                if (character == '/' && lexerBuffer == "/") {
-                    lexerBuffer = ""
+                if (character == '/' && lexerBuffer.length == 1 && lexerBuffer[0] == '/') {
+                    lexerBuffer.clear()
                     state = LexState.ANNOTATION
                     continue
                 }
                 if (whiteSpace.contains(character) || character.isDigit()) {
-                    tokenList.add(Token(LexState.OPERATOR, lexerBuffer))
-                    lexerBuffer = ""
+                    flushToken(LexState.OPERATOR)
                     if (character.isDigit()) {
-                        lexerBuffer += character
+                        lexerBuffer.append(character)
                         state = LexState.INTEGER
                         continue
                     }
                     state = LexState.IDLE
                     continue
                 }
-                if (enableToLinkWithEqual.contains(lexerBuffer) && character == '=') {
-                    lexerBuffer += '='
-                    tokenList.add(Token(LexState.OPERATOR, lexerBuffer))
-                    lexerBuffer = ""
+                val opText = lexerBuffer.toString()
+                if (enableToLinkWithEqual.contains(opText) && character == '=') {
+                    lexerBuffer.append('=')
+                    flushToken(LexState.OPERATOR)
                     state = LexState.IDLE
                     continue
                 }
                 if (enableToDouble.contains(character.toString()) && lexerBuffer.length == 1 && lexerBuffer[0] == character) {
-                    lexerBuffer += character
-                    tokenList.add(Token(LexState.OPERATOR, lexerBuffer))
-                    lexerBuffer = ""
+                    lexerBuffer.append(character)
+                    flushToken(LexState.OPERATOR)
                     state = LexState.IDLE
                     continue
                 }
-                tokenList.add(Token(LexState.OPERATOR, lexerBuffer))
-                lexerBuffer = ""
+                flushToken(LexState.OPERATOR)
                 when {
                     character.isDigit() -> {
-                        lexerBuffer += character
+                        lexerBuffer.append(character)
                         state = LexState.INTEGER //switch to Int mode
                     }
 
                     character == '.' -> {
-                        lexerBuffer = "."
+                        lexerBuffer.append('.')
                         state = LexState.FLOAT
                     }
-                    operators.contains(character)->{
-                        lexerBuffer+=character
-                        state=LexState.OPERATOR
+                    operators.contains(character) -> {
+                        lexerBuffer.append(character)
+                        state = LexState.OPERATOR
                     }
-                    setOf(' ', '\n', '\t').contains(character) -> state=LexState.IDLE
+                    character == ' ' || character == '\n' || character == '\r' || character == '\t' -> state = LexState.IDLE
                     else -> {
                         state = LexState.IDENTIFIER
-                        lexerBuffer += character
+                        lexerBuffer.append(character)
                     }//switch to Identify mode
                 }
             }
@@ -267,12 +260,12 @@ fun lexer(rawText: String): MutableList<Token> {
     if (state == LexState.ANNOTATION)
         return tokenList
     if (state == LexState.CHAR) {
-        throw IllegalStateException("are you missing another \'\"\' ?")
+        throw IllegalStateException("are you missing another '\'' ?")
     }
     if (state == LexState.STRING) {
-        throw IllegalStateException("are you missing another \"'\" ?")
+        throw IllegalStateException("are you missing another '\"' ?")
     }
     if (state != LexState.IDLE)
-        tokenList.add(Token(state, lexerBuffer))
+        flushToken(state)
     return tokenList
 }
